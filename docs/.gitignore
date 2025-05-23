@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+
+# Virtual environment
+venv/
+venv_designer/
+venv_filler/
+.venv/
+env/
+ENV/
+*.env
+.env.*
+
+# IDEs and editors
+.vscode/
+.idea/
+*.project
+*.pydevproject
+*.sublime-workspace
+*.sublime-project
+
+# OS-generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# PyInstaller
+*.spec
+# If you are bundling your app into a single directory, you might want to ignore the output folder
+# For example, if your output folder is `dist_app`:
+# dist_app/
+
+# Log files
+*.log
+logs/
+
+# Coverage reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Specific to SpeedyF (if any build artifacts are consistently named)
+# e.g., if exported filler programs always go into a specific temp build dir before packaging:
+# temp_export_build/
