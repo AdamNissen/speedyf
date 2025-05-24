@@ -50,14 +50,23 @@ SpeedyF aims to provide a user-friendly graphical interface (GUI) for designing 
 
 ## Repository Structure
 speedyf/
+
 ├── designer_app/                 # Source code for the SpeedyF Designer application
+
 ├── exported_program_template/    # Template/core for the exported SpeedyF filler program
+
 ├── docs/                         # Project documentation (user guides, technical info)
+
 ├── examples/                     # Example projects created with SpeedyF
+
 ├── scripts/                      # Helper scripts (e.g., for building, packaging)
+
 ├── .gitignore
+
 ├── LICENSE                       # Project License (e.g., MIT, GPL - TBD)
+
 └── README.md                     # This file
+
 
 ## Getting Started (For Developers)
 
@@ -72,7 +81,7 @@ speedyf/
 
 1.  **Clone the repository:**
     ```bash
-    git clone <your-repository-url>
+    git clone https://github.com/AdamNissen/speedyf.git
     cd speedyf
     ```
 
@@ -87,7 +96,6 @@ speedyf/
     pip install -r requirements_designer.txt
     cd ..
     ```
-    *(Note: `requirements_designer.txt` will need to be created and list PyQt6/PySide6, PyMuPDF, etc.)*
 
 3.  **Set up the Exported SpeedyF Program Template environment:**
     ```bash
@@ -100,7 +108,6 @@ speedyf/
     pip install -r requirements_filler.txt
     cd ..
     ```
-    *(Note: `requirements_filler.txt` will need to be created and list PyMuPDF, Pillow, etc. Tkinter is standard.)*
 
 ### Running the Applications
 
@@ -150,11 +157,10 @@ We welcome contributions to SpeedyF! Please feel free to:
 * Suggest new features or enhancements.
 * Submit pull requests (please follow the coding style and discuss significant changes first).
 
-*(Details on contributing guidelines, coding standards, etc., can be added to a `CONTRIBUTING.md` file later.)*
 
 ## License
 
-To Be Determined (e.g., MIT License, Apache 2.0).
+MIT license, see LICENSE
 
 
 ## Contact
