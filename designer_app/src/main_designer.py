@@ -1,11 +1,63 @@
+import json
+import uuid
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, # Changed QWidget to QMainWindow
                              QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, 
                              QMessageBox, QScrollArea, QSizePolicy, 
-                             QToolBar) # Added QToolBar
+                             QToolBar, QDialog, QDialogButtonBox, 
+                             QFormLayout, QLineEdit ) # Added QToolBar
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QAction, QIcon # Added QAction, QIcon
 from PyQt6.QtCore import Qt, QPoint, QRect, pyqtSignal
 import fitz  # PyMuPDF
+
+class AreaPropertiesDialog(QDialog):
+    def __init__(self, area_type, default_data_field_id="", default_prompt="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Area Properties")
+
+        self.area_type = area_type
+
+        # Main layout for the dialog
+        layout = QVBoxLayout(self)
+
+        # Form layout for input fields
+        form_layout = QFormLayout()
+
+        self.type_label = QLabel(f"Type: {self.area_type}")
+        # We could make this bold or styled if desired
+        # self.type_label.setStyleSheet("font-weight: bold;")
+        form_layout.addRow(self.type_label) # Just display the type
+
+        self.data_field_id_input = QLineEdit(self)
+        self.data_field_id_input.setText(default_data_field_id)
+        form_layout.addRow("Data Field Name/Link ID:", self.data_field_id_input)
+
+        self.prompt_input = QLineEdit(self) # Or QTextEdit for multi-line prompts later
+        self.prompt_input.setText(default_prompt)
+        form_layout.addRow("Prompt for End-User:", self.prompt_input)
+
+        layout.addLayout(form_layout)
+
+        # Standard OK and Cancel buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | 
+                                           QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.accepted.connect(self.accept) # Connect OK to accept
+        self.button_box.rejected.connect(self.reject) # Connect Cancel to reject
+
+        layout.addWidget(self.button_box)
+
+        self.setLayout(layout)
+        self.setMinimumWidth(350) # Set a reasonable minimum width
+
+    def getProperties(self):
+        # Return the entered properties if dialog was accepted
+        if self.result() == QDialog.DialogCode.Accepted:
+            return {
+                "data_field_id": self.data_field_id_input.text().strip(),
+                "prompt": self.prompt_input.text().strip()
+                # 'type' is already known by the caller (DesignerApp)
+            }
+        return None # Or raise an exception, or return an empty dict
 
 class InteractivePdfLabel(QLabel):
     rectDefinedSignal = pyqtSignal(QRect) 
@@ -103,61 +155,68 @@ class InteractivePdfLabel(QLabel):
         self.page_visual_rects = {}
         self.update() # Repaint to clear visuals
 
-class DesignerApp(QMainWindow): # Changed from QWidget
+class DesignerApp(QMainWindow):
     def __init__(self):
-        super().__init__() # Changed for QMainWindow
+        super().__init__()
         self.pdf_document = None
+        self.current_pdf_path = None # **** NEW: Path to the currently loaded PDF ****
+        self.current_project_path = None # **** NEW: Path to the current project file ****
         self.current_page_num = 0
         self.current_zoom_factor = 1.5
         self.defined_pdf_areas = []
-        self.current_drawing_tool = None # To store the active tool, e.g., "text_area"
+        self.current_drawing_tool = None
         self.initUI()
 
     def initUI(self):
         self.setWindowTitle('SpeedyF Designer')
-        self.setGeometry(100, 100, 900, 750) # Adjusted size slightly for toolbar
-
-        # --- Create a Central Widget ---
-        # QMainWindow needs a central widget. All your previous main content
-        # will go into a layout set on this central widget.
+        self.setGeometry(100, 100, 900, 750)
+        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
 
-        # --- Main Layout (will be set on the central_widget) ---
-        main_layout = QVBoxLayout(central_widget) # Apply layout to central_widget
+        # --- Menu Bar ---
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu('&File')
 
-        # --- Toolbar ---
+        self.save_project_as_action = QAction('&Save Project As...', self)
+        self.save_project_as_action.setStatusTip('Save the current project to a new file')
+        self.save_project_as_action.triggered.connect(self.saveProjectAs)
+        self.save_project_as_action.setEnabled(False) # Disabled until a PDF is loaded
+        file_menu.addAction(self.save_project_as_action)
+
+        # We can add "Save" later
+        # self.save_project_action = QAction('&Save Project', self)
+        # self.save_project_action.setStatusTip('Save the current project')
+        # self.save_project_action.setShortcut(QKeySequence.StandardKey.Save) # Ctrl+S
+        # self.save_project_action.triggered.connect(self.saveProject)
+        # self.save_project_action.setEnabled(False) # Disabled until project has a path
+        # file_menu.addAction(self.save_project_action)
+
+        # --- Toolbar (as before) ---
         toolbar = QToolBar("Main Toolbar")
-        self.addToolBar(toolbar) # Add the toolbar to the QMainWindow
-
-        # Action for defining text areas
-        # You can find standard icons using QStyle or provide your own .png files
-        # For now, we'll just use text. If you have an icon: QIcon("path/to/icon.png")
-        self.define_text_area_action = QAction("Text Area", self) # Text will appear on toolbar if no icon
+        # ... (rest of toolbar setup as before) ...
+        self.addToolBar(toolbar)
+        self.define_text_area_action = QAction("Text Area", self)
         self.define_text_area_action.setStatusTip("Define a text input area")
-        self.define_text_area_action.setCheckable(True) # Makes it a toggle-able tool
+        self.define_text_area_action.setCheckable(True)
         self.define_text_area_action.triggered.connect(self.setTextAreaTool)
         toolbar.addAction(self.define_text_area_action)
-        
-        # We'll use an action group later to make tools mutually exclusive
-        # self.tool_action_group = QActionGroup(self)
-        # self.tool_action_group.addAction(self.define_text_area_action)
-        # self.tool_action_group.setExclusive(True)
 
-        # --- Top section for controls (as before, but added to main_layout) ---
-        controls_widget = QWidget() 
+
+        # --- Controls Widget (as before) ---
+        controls_widget = QWidget()
+        # ... (rest of controls_widget and its layout as before) ...
         controls_layout = QVBoxLayout(controls_widget)
-
-        self.info_label = QLabel('Select a tool, then load a PDF to begin.', self) # Updated info
+        self.info_label = QLabel('Select a tool, then load a PDF to begin.', self)
         controls_layout.addWidget(self.info_label)
-
+        # ... (load_pdf_button, nav_layout as before) ...
         self.load_pdf_button = QPushButton('Load PDF', self)
         self.load_pdf_button.clicked.connect(self.openPdfFile)
         controls_layout.addWidget(self.load_pdf_button)
 
         nav_layout = QHBoxLayout()
         self.prev_page_button = QPushButton("<< Previous", self)
-        # ... (rest of nav_layout setup as before) ...
         self.prev_page_button.clicked.connect(self.goToPreviousPage)
         self.prev_page_button.setEnabled(False)
         nav_layout.addWidget(self.prev_page_button)
@@ -171,25 +230,25 @@ class DesignerApp(QMainWindow): # Changed from QWidget
         nav_layout.addWidget(self.next_page_button)
         
         controls_layout.addLayout(nav_layout)
-        
         main_layout.addWidget(controls_widget)
 
-        # PDF Display Area (as before, added to main_layout)
+
+        # --- PDF Display Area (as before) ---
         self.pdf_display_label = InteractivePdfLabel(self)
         # ... (rest of pdf_display_label and scroll_area setup as before) ...
         self.default_min_display_width = 400
         self.default_min_display_height = 300
         self.pdf_display_label.setMinimumSize(self.default_min_display_width, self.default_min_display_height)
         self.pdf_display_label.setStyleSheet("QLabel { background-color : lightgray; border: 1px solid black; }")
-        
         self.pdf_display_label.rectDefinedSignal.connect(self.handleRectDefined)
-
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setWidget(self.pdf_display_label)
-        
         main_layout.addWidget(self.scroll_area)
         main_layout.setStretchFactor(self.scroll_area, 1)
+
+        # Status Bar (QMainWindow has one by default)
+        self.statusBar().showMessage("Ready")
 
     def setTextAreaTool(self, checked):
         if checked:
@@ -273,56 +332,92 @@ class DesignerApp(QMainWindow): # Changed from QWidget
             self._reset_pdf_display_label(f"Error displaying page {page_num + 1}")
             self._updateNavigation()
 
-    def handleRectDefined(self, view_qrect):
+    def handleRectDefined(self, view_qrect): # view_qrect is the QRect from the signal
         if not self.pdf_document or self.pdf_display_label.current_pixmap_page_num is None:
-            return # Should not happen if mousePressEvent checks for active tool and pixmap
+            return 
         
-        current_tool_page = self.pdf_display_label.current_pixmap_page_num # Page where rect was drawn
+        current_tool_page = self.pdf_display_label.current_pixmap_page_num
 
         if self.current_drawing_tool == "text_area":
-            inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
-            view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
-                                       view_qrect.right(), view_qrect.bottom())
-            pdf_fitz_rect = view_fitz_rect * inverse_matrix
+            # Prepare initial values for the dialog. These will be updated if the user makes an error
+            # and the dialog needs to re-appear with previously entered data.
+            # For the very first time, we can suggest a default name or leave it blank.
+            suggested_data_field_id = f"TextArea_{len(self.defined_pdf_areas) + 1}" # Optional suggestion
+            current_prompt_text = "" # Start with an empty prompt
 
-            area_name = f"TextArea_{len(self.defined_pdf_areas) + 1}" # Temporary naming
-            area_prompt = "Enter text here"
-            area_type = "text_input"
-            
-            defined_area_info = {
-                'page_num': current_tool_page, # Use the page number where rect was drawn
-                'rect_pdf': tuple(pdf_fitz_rect.irect), 
-                'name': area_name, 'type': area_type, 'prompt': area_prompt,
-            }
-            # self.defined_pdf_areas.append(defined_area_info) # After dialog
-            print(f"Tool: {self.current_drawing_tool} on Page {current_tool_page + 1}")
-            print(f"  View Rect: {view_qrect.x()},{view_qrect.y()},{view_qrect.width()},{view_qrect.height()}")
-            print(f"  PDF Coords: {pdf_fitz_rect.irect}")
+            while True: # Loop until dialog is accepted with valid data, or cancelled
+                dialog = AreaPropertiesDialog(
+                    area_type="Text Input", 
+                    default_data_field_id=suggested_data_field_id, # Pass the current/suggested ID
+                    default_prompt=current_prompt_text,           # Pass the current prompt
+                    parent=self
+                )
 
-            # **** CHANGE: Pass current page number to addVisualRect ****
-            self.pdf_display_label.addVisualRect(current_tool_page, view_qrect)
-            
-            # TODO: Open metadata dialog. On OK, add to self.defined_pdf_areas.
-            # If dialog is cancelled, we might want a way to remove the last visual rect:
-            # self.pdf_display_label.removeLastVisualRectForPage(current_tool_page) -> new method needed in label
-        else:
-            pass # No tool active, no visual rect added.
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    properties = dialog.getProperties()
+                    
+                    # Preserve entered values for potential next iteration of the dialog
+                    suggested_data_field_id = properties["data_field_id"] if properties else suggested_data_field_id
+                    current_prompt_text = properties["prompt"] if properties else current_prompt_text
+
+                    if properties and properties["data_field_id"]: # Ensure a name was provided
+                        # Valid input: Proceed to create and store the area information
+                        inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+                        view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
+                                                   view_qrect.right(), view_qrect.bottom())
+                        pdf_fitz_rect = view_fitz_rect * inverse_matrix
+                        
+                        instance_id = f"inst_{uuid.uuid4().hex[:8]}"
+
+                        defined_area_info = {
+                            'instance_id': instance_id,
+                            'page_num': current_tool_page,
+                            'rect_pdf': tuple(pdf_fitz_rect.irect), 
+                            'data_field_id': properties["data_field_id"],
+                            'type': "text_input", 
+                            'prompt': properties["prompt"]
+                        }
+                        self.defined_pdf_areas.append(defined_area_info)
+
+                        print(f"Area Defined and Accepted:")
+                        print(f"  Data Field ID: {properties['data_field_id']}, Prompt: {properties['prompt']}")
+                        # ... (other print statements if you want them) ...
+                        print(f"  Total Defined Areas: {len(self.defined_pdf_areas)}")
+
+                        self.pdf_display_label.addVisualRect(current_tool_page, view_qrect)
+                        break # Exit the while loop, successfully defined
+                    
+                    else: # Dialog accepted, but data_field_id was empty
+                        QMessageBox.warning(self, "Missing Information", 
+                                            "Data Field Name / Link ID cannot be empty. Please try again.")
+                        # Loop continues, dialog will re-appear.
+                        # suggested_data_field_id will be empty, current_prompt_text will retain its value.
+                
+                else: # Dialog was cancelled (QDialog.DialogCode.Rejected)
+                    print("Area definition cancelled by user.")
+                    break # Exit the while loop, area not defined
+        
+        # else: (no active drawing tool) - no changes needed here
+            pass
 
     def openPdfFile(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open PDF File", "", 
                                                    "PDF Files (*.pdf);;All Files (*)")
         if file_name:
+            # ... (close previous document, reset labels, etc.)
             if self.pdf_document:
                 self.pdf_document.close()
                 self.pdf_document = None
-            
             self._reset_pdf_display_label() 
             self.defined_pdf_areas = [] 
-            self.pdf_display_label.clearDefinedRects() # This now clears the page_visual_rects dictionary
-            self._updateNavigation() # Call after resetting, includes resetting page_info_label
+            self.pdf_display_label.clearDefinedRects()
+            self._updateNavigation()
+            
+            self.current_pdf_path = None # Reset before attempting to load new one
 
             try:
                 doc = fitz.open(file_name)
+                # ... (PDF validation logic) ...
                 if not doc.is_pdf:
                     doc.close()
                     QMessageBox.critical(self, "Error", 
@@ -332,16 +427,31 @@ class DesignerApp(QMainWindow): # Changed from QWidget
                     return
 
                 self.pdf_document = doc
+                self.current_pdf_path = file_name # **** STORE PDF PATH HERE ****
                 self.current_page_num = 0 
                 self.current_zoom_factor = 1.5
                 self.info_label.setText(f"Loaded: {file_name.split('/')[-1]} ({self.pdf_document.page_count} pages)")
-                self.displayPdfPage(self.current_page_num) # This calls _updateNavigation and setCurrentPixmapPage
+                self.displayPdfPage(self.current_page_num)
+                
+                # Enable save action now that a PDF is loaded
+                if hasattr(self, 'save_project_as_action'): # Check if action exists
+                    self.save_project_as_action.setEnabled(True)
+                if hasattr(self, 'save_project_action'): # For later "Save" action
+                     self.save_project_action.setEnabled(False) # "Save" disabled until saved once
 
+
+            # ... (exception handling) ...
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to open or process file: {e}")
                 self.pdf_document = None 
+                self.current_pdf_path = None # Clear path on error
                 self._reset_pdf_display_label("Failed to load. Please try another file.")
                 self._updateNavigation()
+                if hasattr(self, 'save_project_as_action'):
+                    self.save_project_as_action.setEnabled(False) # Disable if PDF load failed
+                if hasattr(self, 'save_project_action'):
+                     self.save_project_action.setEnabled(False)
+
         else:
             pass
 
@@ -355,6 +465,74 @@ class DesignerApp(QMainWindow): # Changed from QWidget
             self.current_page_num += 1
             self.displayPdfPage(self.current_page_num)
 
+    def saveProjectAs(self):
+        if not self.current_pdf_path:
+            QMessageBox.warning(self, "Cannot Save", "Please load a PDF document first.")
+            return
+
+        # Suggest a file name, perhaps based on PDF name or a default
+        suggested_filename = "untitled.speedyf_proj"
+        if self.current_pdf_path:
+            pdf_basename = self.current_pdf_path.split('/')[-1].split('\\')[-1]
+            pdf_name_part = pdf_basename.rsplit('.', 1)[0] if '.' in pdf_basename else pdf_basename
+            suggested_filename = f"{pdf_name_part}.speedyf_proj"
+
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Project As...", suggested_filename,
+                                                   "SpeedyF Project Files (*.speedyf_proj);;All Files (*)")
+
+        if file_path:
+            project_data = {
+                'version': '1.0', # Good to have for future compatibility
+                'pdf_path': self.current_pdf_path,
+                'defined_areas': self.defined_pdf_areas 
+                # self.defined_pdf_areas already contains dicts with page_num, rect_pdf (tuple), 
+                # instance_id, data_field_id, type, prompt
+            }
+
+            try:
+                with open(file_path, 'w') as f:
+                    json.dump(project_data, f, indent=4)
+                
+                self.current_project_path = file_path # Store path for future "Save"
+                self.statusBar().showMessage(f"Project saved to {file_path}", 5000) # Show for 5 secs
+                # self.info_label.setText(f"Project saved: {file_path.split('/')[-1]}") # Optional
+                # Update window title to include project name? (more advanced)
+                # if hasattr(self, 'save_project_action'):
+                #     self.save_project_action.setEnabled(True) # Enable "Save" action
+
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", f"Could not save project: {e}")
+                self.statusBar().showMessage(f"Error saving project: {e}")
+        else:
+            self.statusBar().showMessage("Save operation cancelled.", 2000)
+
+    # Also, ensure _reset_pdf_display_label and openPdfFile clear current_project_path
+    # and disable relevant save actions if you add a simple "Save" later.
+    # For now, openPdfFile also disables save_project_as_action if PDF load fails.
+    # When a new PDF is loaded, current_project_path should be reset so "Save As" is effectively required
+    # for that new context, or a "New Project" action should clear it.
+
+    def _reset_pdf_display_label(self, message="PDF page will appear here"):
+        # ... (existing code) ...
+        self.pdf_display_label.setCurrentPixmapPage(None) 
+        self.page_info_label.setText("Page 0 of 0")
+        self.prev_page_button.setEnabled(False)
+        self.next_page_button.setEnabled(False)
+        # When resetting (e.g. no PDF loaded), disable save.
+        # If you add a "New Project" action, it should also call this or similar logic.
+        # For now, openPdfFile handles enabling/disabling save_project_as_action.
+        # self.current_project_path = None # If a "New Project" action resets everything
+        # if hasattr(self, 'save_project_as_action'): self.save_project_as_action.setEnabled(False)
+        # if hasattr(self, 'save_project_action'): self.save_project_action.setEnabled(False)
+
+
+    # In openPdfFile, when a new PDF is loaded, you might want to reset self.current_project_path
+    # to None to signify that this new PDF + its areas (if any are defined yet)
+    # hasn't been saved as a project yet.
+    # At the point a new PDF is successfully loaded in openPdfFile:
+    # self.current_project_path = None
+    # self.save_project_action.setEnabled(False) # If you had a "Save" action
+    # This encourages "Save As" for a newly opened/modified PDF configuration.
 
 
 # Main function remains the same
