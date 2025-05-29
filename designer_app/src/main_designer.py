@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, # Chang
                              QMessageBox, QScrollArea, QSizePolicy, 
                              QToolBar, QDialog, QDialogButtonBox, 
                              QFormLayout, QLineEdit ) # Added QToolBar
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QAction, QIcon # Added QAction, QIcon
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QAction, QIcon, QKeySequence # Added QAction, QIcon
 from PyQt6.QtCore import Qt, QPoint, QRect, pyqtSignal
 import fitz  # PyMuPDF
 
@@ -179,19 +179,31 @@ class DesignerApp(QMainWindow):
         menubar = self.menuBar()
         file_menu = menubar.addMenu('&File')
 
+        # New Project Action (as before)
+        new_project_action = QAction('&New Project', self)
+        new_project_action.setStatusTip('Create a new project')
+        new_project_action.setShortcut(QKeySequence.StandardKey.New)
+        new_project_action.triggered.connect(self.newProject)
+        file_menu.addAction(new_project_action)
+
+        file_menu.addSeparator()
+
+        # **** NEW: Save Project Action ****
+        self.save_project_action = QAction('&Save Project', self)
+        self.save_project_action.setStatusTip('Save the current project')
+        self.save_project_action.setShortcut(QKeySequence.StandardKey.Save) # Ctrl+S
+        self.save_project_action.triggered.connect(self.saveProject)
+        self.save_project_action.setEnabled(False) # Disabled until project has a path and changes are made (or just after first save)
+        file_menu.addAction(self.save_project_action)
+
+        # Save Project As... Action (as before)
         self.save_project_as_action = QAction('&Save Project As...', self)
         self.save_project_as_action.setStatusTip('Save the current project to a new file')
         self.save_project_as_action.triggered.connect(self.saveProjectAs)
         self.save_project_as_action.setEnabled(False) # Disabled until a PDF is loaded
         file_menu.addAction(self.save_project_as_action)
 
-        # We can add "Save" later
-        # self.save_project_action = QAction('&Save Project', self)
-        # self.save_project_action.setStatusTip('Save the current project')
-        # self.save_project_action.setShortcut(QKeySequence.StandardKey.Save) # Ctrl+S
-        # self.save_project_action.triggered.connect(self.saveProject)
-        # self.save_project_action.setEnabled(False) # Disabled until project has a path
-        # file_menu.addAction(self.save_project_action)
+        # We'll add "Open" later
 
         # --- Toolbar (as before) ---
         toolbar = QToolBar("Main Toolbar")
@@ -275,15 +287,24 @@ class DesignerApp(QMainWindow):
     #     self.define_text_area_action.setChecked(False)
 
     def _reset_pdf_display_label(self, message="PDF page will appear here"):
-        self.pdf_display_label.clear()
-        self.pdf_display_label.setText(message)
+        print("Attempting _reset_pdf_display_label...") # For debugging
+        self.pdf_display_label.setPixmap(QPixmap()) 
+        self.pdf_display_label.setText(message) 
         self.pdf_display_label.setMinimumSize(self.default_min_display_width, self.default_min_display_height)
         self.pdf_display_label.adjustSize()
-        self.pdf_display_label.setCurrentPixmapPage(None) # Reset page context for label
-        # Also reset navigation when no PDF is loaded
+        self.pdf_display_label.setCurrentPixmapPage(None)
+        
         self.page_info_label.setText("Page 0 of 0")
         self.prev_page_button.setEnabled(False)
         self.next_page_button.setEnabled(False)
+
+        if self.scroll_area and self.scroll_area.viewport():
+            self.scroll_area.viewport().update()
+
+        # **** NEW: Try hiding and showing the label ****
+        self.pdf_display_label.hide()
+        self.pdf_display_label.show()
+        print("_reset_pdf_display_label finished.")
 
     def _updateNavigation(self):
         """Updates page info label and button states."""
@@ -404,55 +425,66 @@ class DesignerApp(QMainWindow):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open PDF File", "", 
                                                    "PDF Files (*.pdf);;All Files (*)")
         if file_name:
-            # ... (close previous document, reset labels, etc.)
+            # Close previous document if one is open
             if self.pdf_document:
                 self.pdf_document.close()
                 self.pdf_document = None
+            
+            # Reset state for the new file context
             self._reset_pdf_display_label() 
             self.defined_pdf_areas = [] 
             self.pdf_display_label.clearDefinedRects()
             self._updateNavigation()
             
-            self.current_pdf_path = None # Reset before attempting to load new one
+            self.current_pdf_path = None # Reset current PDF path
+            self.current_project_path = None # **** NEW: Reset project path for new PDF context ****
+            
+            # Initially disable save actions; they'll be enabled if PDF loads successfully
+            if hasattr(self, 'save_project_as_action'):
+                self.save_project_as_action.setEnabled(False)
+            if hasattr(self, 'save_project_action'):
+                self.save_project_action.setEnabled(False)
 
             try:
                 doc = fitz.open(file_name)
-                # ... (PDF validation logic) ...
                 if not doc.is_pdf:
                     doc.close()
                     QMessageBox.critical(self, "Error", 
                                          f"The selected file '{file_name.split('/')[-1]}' is not a PDF document.")
                     self._reset_pdf_display_label("File is not a PDF. Please select a PDF file.")
                     self._updateNavigation()
+                    # Ensure save actions remain disabled
+                    if hasattr(self, 'save_project_as_action'): self.save_project_as_action.setEnabled(False)
+                    if hasattr(self, 'save_project_action'): self.save_project_action.setEnabled(False)
                     return
 
                 self.pdf_document = doc
-                self.current_pdf_path = file_name # **** STORE PDF PATH HERE ****
+                self.current_pdf_path = file_name # Store new PDF path
                 self.current_page_num = 0 
                 self.current_zoom_factor = 1.5
                 self.info_label.setText(f"Loaded: {file_name.split('/')[-1]} ({self.pdf_document.page_count} pages)")
                 self.displayPdfPage(self.current_page_num)
                 
-                # Enable save action now that a PDF is loaded
-                if hasattr(self, 'save_project_as_action'): # Check if action exists
+                # Enable "Save Project As..." now that a PDF is loaded
+                if hasattr(self, 'save_project_as_action'):
                     self.save_project_as_action.setEnabled(True)
-                if hasattr(self, 'save_project_action'): # For later "Save" action
-                     self.save_project_action.setEnabled(False) # "Save" disabled until saved once
+                # "Save" remains disabled until a "Save As..." is done for this new context
+                if hasattr(self, 'save_project_action'):
+                     self.save_project_action.setEnabled(False)
 
-
-            # ... (exception handling) ...
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to open or process file: {e}")
                 self.pdf_document = None 
                 self.current_pdf_path = None # Clear path on error
+                self.current_project_path = None # Also clear project path on error
                 self._reset_pdf_display_label("Failed to load. Please try another file.")
                 self._updateNavigation()
                 if hasattr(self, 'save_project_as_action'):
-                    self.save_project_as_action.setEnabled(False) # Disable if PDF load failed
+                    self.save_project_as_action.setEnabled(False)
                 if hasattr(self, 'save_project_action'):
                      self.save_project_action.setEnabled(False)
-
         else:
+            # User cancelled the file dialog. Current state remains unchanged.
             pass
 
     def goToPreviousPage(self):
@@ -465,12 +497,37 @@ class DesignerApp(QMainWindow):
             self.current_page_num += 1
             self.displayPdfPage(self.current_page_num)
 
+    def saveProject(self):
+        if not self.current_pdf_path:
+            QMessageBox.warning(self, "Cannot Save", "Please load a PDF document first.")
+            return
+
+        if self.current_project_path:
+            # Project has been saved before, save to the same path
+            project_data = {
+                'version': '1.0',
+                'pdf_path': self.current_pdf_path,
+                'defined_areas': self.defined_pdf_areas
+            }
+            try:
+                with open(self.current_project_path, 'w') as f:
+                    json.dump(project_data, f, indent=4)
+                self.statusBar().showMessage(f"Project saved to {self.current_project_path}", 5000)
+                # TODO (Advanced): Implement a "dirty" flag to track unsaved changes.
+                # For now, "Save" is always available if a project path exists.
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", f"Could not save project: {e}")
+                self.statusBar().showMessage(f"Error saving project: {e}")
+        else:
+            # Project has not been saved before, so call "Save As..."
+            self.saveProjectAs()
+
+    # Modify saveProjectAs to enable the "Save" action after a successful save
     def saveProjectAs(self):
         if not self.current_pdf_path:
             QMessageBox.warning(self, "Cannot Save", "Please load a PDF document first.")
             return
 
-        # Suggest a file name, perhaps based on PDF name or a default
         suggested_filename = "untitled.speedyf_proj"
         if self.current_pdf_path:
             pdf_basename = self.current_pdf_path.split('/')[-1].split('\\')[-1]
@@ -482,35 +539,24 @@ class DesignerApp(QMainWindow):
 
         if file_path:
             project_data = {
-                'version': '1.0', # Good to have for future compatibility
+                'version': '1.0',
                 'pdf_path': self.current_pdf_path,
-                'defined_areas': self.defined_pdf_areas 
-                # self.defined_pdf_areas already contains dicts with page_num, rect_pdf (tuple), 
-                # instance_id, data_field_id, type, prompt
+                'defined_areas': self.defined_pdf_areas
             }
-
             try:
                 with open(file_path, 'w') as f:
                     json.dump(project_data, f, indent=4)
                 
-                self.current_project_path = file_path # Store path for future "Save"
-                self.statusBar().showMessage(f"Project saved to {file_path}", 5000) # Show for 5 secs
-                # self.info_label.setText(f"Project saved: {file_path.split('/')[-1]}") # Optional
+                self.current_project_path = file_path
+                self.statusBar().showMessage(f"Project saved to {file_path}", 5000)
+                # **** NEW: Enable "Save" action after "Save As..." ****
+                self.save_project_action.setEnabled(True) 
                 # Update window title to include project name? (more advanced)
-                # if hasattr(self, 'save_project_action'):
-                #     self.save_project_action.setEnabled(True) # Enable "Save" action
-
             except Exception as e:
                 QMessageBox.critical(self, "Save Error", f"Could not save project: {e}")
                 self.statusBar().showMessage(f"Error saving project: {e}")
         else:
             self.statusBar().showMessage("Save operation cancelled.", 2000)
-
-    # Also, ensure _reset_pdf_display_label and openPdfFile clear current_project_path
-    # and disable relevant save actions if you add a simple "Save" later.
-    # For now, openPdfFile also disables save_project_as_action if PDF load fails.
-    # When a new PDF is loaded, current_project_path should be reset so "Save As" is effectively required
-    # for that new context, or a "New Project" action should clear it.
 
     def _reset_pdf_display_label(self, message="PDF page will appear here"):
         # ... (existing code) ...
@@ -534,7 +580,33 @@ class DesignerApp(QMainWindow):
     # self.save_project_action.setEnabled(False) # If you had a "Save" action
     # This encourages "Save As" for a newly opened/modified PDF configuration.
 
+    def newProject(self):
+        # TODO (Advanced): Check for unsaved changes and prompt.
+        
+        if self.pdf_document:
+            self.pdf_document.close()
+            self.pdf_document = None
 
+        self.current_pdf_path = None
+        self.current_project_path = None # **** ENSURE THIS IS CLEARED ****
+        self.defined_pdf_areas = []
+        self.current_page_num = 0
+        
+        self.pdf_display_label.clearDefinedRects()
+        self._reset_pdf_display_label("Load a PDF to begin a new project.")
+        self._updateNavigation()
+
+        self.info_label.setText("New project started. Load a PDF.")
+        self.statusBar().showMessage("New project created. Ready.", 5000)
+
+        # Update enabled state of menu actions
+        if hasattr(self, 'save_project_as_action'):
+            self.save_project_as_action.setEnabled(False)
+        if hasattr(self, 'save_project_action'): # **** ENSURE SAVE IS DISABLED ****
+            self.save_project_action.setEnabled(False)
+        
+        print("New project started.")
+        
 # Main function remains the same
 def main():
     app = QApplication(sys.argv)
