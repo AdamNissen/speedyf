@@ -273,14 +273,15 @@ class DesignerApp(QMainWindow):
         self.save_project_as_action.setEnabled(False) 
         file_menu.addAction(self.save_project_as_action)
 
+
         # --- Toolbar ---
         toolbar = QToolBar("Main Toolbar")
         self.addToolBar(toolbar)
-        # ... (tool_action_group, select_area_action, define_text_area_action as before) ...
-        self.tool_action_group = QActionGroup(self)
-        self.tool_action_group.setExclusive(True) 
-        self.tool_action_group.triggered.connect(self.handleToolSelected)
 
+        self.tool_action_group = QActionGroup(self)
+        self.tool_action_group.setExclusive(True)
+        self.tool_action_group.triggered.connect(self.handleToolSelected)
+        # ... (select_area_action, define_text_area_action as before, added to tool_action_group and toolbar) ...
         self.select_area_action = QAction("Select Area", self) 
         self.select_area_action.setStatusTip("Select, move, or edit defined areas")
         self.select_area_action.setCheckable(True)
@@ -295,6 +296,17 @@ class DesignerApp(QMainWindow):
         toolbar.addAction(self.define_text_area_action)
         self.tool_action_group.addAction(self.define_text_area_action)
 
+        toolbar.addSeparator() # Separator before new actions
+
+        # **** NEW: Delete Area Action ****
+        self.delete_area_action = QAction("Delete Area", self)
+        # self.delete_area_action.setIcon(QIcon("path/to/delete_icon.png")) # Optional icon
+        self.delete_area_action.setStatusTip("Delete the currently selected area")
+        self.delete_area_action.triggered.connect(self.deleteSelectedArea)
+        self.delete_area_action.setEnabled(False) # Initially disabled
+        toolbar.addAction(self.delete_area_action)
+        
+        # TODO: Add "Edit Area Properties" action later
 
         # --- Controls Widget (as before) ---
         controls_widget = QWidget()
@@ -375,16 +387,20 @@ class DesignerApp(QMainWindow):
             
             print(f"DesignerApp: Area selected - Instance ID: {selected_instance_id}")
             if selected_area_data:
-                 print(f"   Data Field ID: {selected_area_data['data_field_id']}")
-            self.statusBar().showMessage(f"Area {selected_instance_id} selected.", 3000)
-            # TODO: Enable "Edit Properties" and "Delete Area" buttons here
-            if hasattr(self, 'delete_area_action'): self.delete_area_action.setEnabled(True)
+                print(f"   Data Field ID: {selected_area_data['data_field_id']}")
+                print(f"DesignerApp: Area selected - Instance ID: {selected_instance_id}")
+                self.statusBar().showMessage(f"Area {selected_instance_id} selected.", 3000)
+                # Enable Delete/Edit actions
+                if hasattr(self, 'delete_area_action'): 
+                    self.delete_area_action.setEnabled(True)
+                # if hasattr(self, 'edit_area_action'): self.edit_area_action.setEnabled(True) # For later
 
         else: # None was passed (or empty string), meaning selection was cleared
             print("DesignerApp: Selection cleared.")
             self.statusBar().showMessage("Selection cleared.", 3000)
-            # TODO: Disable "Edit Properties" and "Delete Area" buttons here
-            if hasattr(self, 'delete_area_action'): self.delete_area_action.setEnabled(False)
+            # Disable Delete/Edit actions
+            if hasattr(self, 'delete_area_action'): 
+                self.delete_area_action.setEnabled(False)
 
     def _reset_pdf_display_label(self, message="PDF page will appear here"):
         print("Attempting _reset_pdf_display_label...") # For debugging
@@ -876,7 +892,80 @@ class DesignerApp(QMainWindow):
     def setSelectToolActive(self): # Helper to activate select tool programmatically (e.g., on startup)
         self.select_area_action.setChecked(True)
         # handleToolSelected will be called automatically by QActionGroup's triggered signal
+
+    def deleteSelectedArea(self):
+        if not self.currently_selected_area_instance_id:
+            print("No area selected to delete.")
+            return
+
+        selected_id = self.currently_selected_area_instance_id
+        area_to_delete_page_num = -1
+        area_found_in_data = False
+
+        # Find and remove the area from the data model (self.defined_pdf_areas)
+        for i, area_info in enumerate(self.defined_pdf_areas):
+            if area_info['instance_id'] == selected_id:
+                area_to_delete_page_num = area_info['page_num']
+                del self.defined_pdf_areas[i]
+                area_found_in_data = True
+                print(f"Data for area {selected_id} removed from self.defined_pdf_areas.")
+                break
         
+        if not area_found_in_data:
+            print(f"Error: Could not find data for selected area ID {selected_id} to delete.")
+            # Clear selection just in case, though this state should ideally not occur
+            self.handleAreaSelectionChanged(None) 
+            if self.pdf_display_label.selected_visual_info and \
+               self.pdf_display_label.selected_visual_info.get('id') == selected_id:
+                self.pdf_display_label.selected_visual_info = None
+                self.pdf_display_label.update()
+            return
+
+        # Tell InteractivePdfLabel to remove the visual representation
+        # We need the page number where the visual rect was.
+        # The selected_id was on self.pdf_display_label.current_pixmap_page_num
+        # or area_to_delete_page_num if found.
+        
+        # The selection highlight is managed by InteractivePdfLabel's selected_visual_info.
+        # The visual rectangle itself is in InteractivePdfLabel's page_visual_rects.
+        
+        current_label_page = self.pdf_display_label.current_pixmap_page_num
+        if area_to_delete_page_num != -1 : # Check if page_num was found
+            # Remove the visual rectangle from the label's storage
+            removed_visual = self.pdf_display_label.removeVisualRectById(area_to_delete_page_num, selected_id)
+            if removed_visual:
+                print(f"Visual for area {selected_id} on page {area_to_delete_page_num + 1} removed.")
+            else:
+                print(f"Warning: Visual for area {selected_id} on page {area_to_delete_page_num + 1} not found in label's store for removal.")
+
+            # If the deleted area was on the currently displayed page, 
+            # ensure the label updates and clears its own selection state for that ID.
+            if area_to_delete_page_num == current_label_page:
+                if self.pdf_display_label.selected_visual_info and \
+                   self.pdf_display_label.selected_visual_info.get('id') == selected_id:
+                    self.pdf_display_label.selected_visual_info = None 
+                    # No need to emit here, handleAreaSelectionChanged(None) below will do it for DesignerApp
+                self.pdf_display_label.update() # Repaint the label to remove the blue box and highlight
+
+        # Clear the current selection in DesignerApp and update UI (e.g., disable Delete button)
+        self.handleAreaSelectionChanged(None) 
+
+        self.statusBar().showMessage(f"Area {selected_id} deleted.", 3000)
+        print(f"Area {selected_id} deleted. Remaining areas: {len(self.defined_pdf_areas)}")
+        # TODO (Advanced): Mark project as "dirty" / needing save.
+
+    def keyPressEvent(self, event):
+        """Handle key presses for the main window."""
+        if self.currently_selected_area_instance_id: # Check if an area is selected
+            if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
+                print("Delete/Backspace key pressed with selection.")
+                self.deleteSelectedArea()
+                event.accept() # Indicate we've handled the event
+                return
+
+        # Call the base class implementation for any other key events
+        super().keyPressEvent(event)
+
 # Main function remains the same
 def main():
     app = QApplication(sys.argv)
