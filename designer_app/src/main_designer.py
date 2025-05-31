@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
 
 # QtGui - QActionGroup added here
 from PyQt6.QtGui import (QPixmap, QImage, QPainter, QPen, QAction, QIcon, 
-                         QKeySequence, QActionGroup) # Added QActionGroup
+                         QKeySequence, QActionGroup, QBrush) # Added QActionGroup
 
 from PyQt6.QtCore import Qt, QPoint, QRect, pyqtSignal
 import fitz  # PyMuPDF
@@ -73,13 +73,13 @@ class InteractivePdfLabel(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_widget = parent
-        
         self.current_rubber_band_rect = None
         self.origin_point = None      
-        # **** CHANGE: Store dicts with 'rect' and 'id' ****
-        self.page_visual_rects = {} # Key: page_num, Value: list of {'rect': QRect, 'id': str}
+        # **** CHANGE: Store dicts with 'rect', 'id', AND 'type' ****
+        self.page_visual_rects = {} # Key: page_num, Value: list of {'rect': QRect, 'id': str, 'type': str}
         self.current_pixmap_page_num = None
-        self.selected_visual_info = None # **** NEW: Stores {'rect': QRect, 'id': str} of selected item, or None ****
+        self.selected_visual_info = None # Stores a selected {'rect': QRect, 'id': str, 'type': str} dict
+
 
     # **** NEW METHOD ****
     def setCurrentPixmapPage(self, page_num):
@@ -87,25 +87,31 @@ class InteractivePdfLabel(QLabel):
         self.current_pixmap_page_num = page_num
         self.update() # Trigger a repaint to show rects for the new page
 
-    def addVisualRect(self, page_num, view_qrect, instance_id):
+    def addVisualRect(self, page_num, view_qrect, instance_id, area_type):
         if page_num not in self.page_visual_rects:
             self.page_visual_rects[page_num] = []
-        self.page_visual_rects[page_num].append({'rect': view_qrect, 'id': instance_id})
-        
+        self.page_visual_rects[page_num].append({'rect': view_qrect, 'id': instance_id, 'type': area_type})
+
         if page_num == self.current_pixmap_page_num:
             self.update()
 
     def mousePressEvent(self, event):
+        print(f"InteractivePdfLabel.mousePressEvent: Active tool from parent: '{self.parent_widget.current_drawing_tool}'")
         if event.button() == Qt.MouseButton.LeftButton and self.pixmap() and self.parent_widget:
             active_tool = self.parent_widget.current_drawing_tool
             click_pos = event.pos()
 
-            if active_tool == "text_area":
+            # Check if the active tool is one of the tools that should initiate drawing
+
+            drawing_tools = ["text_area", "signature_area", "initials_area"] 
+            if active_tool in drawing_tools:
                 self.origin_point = click_pos
                 self.current_rubber_band_rect = QRect(self.origin_point, self.origin_point)
-                if self.selected_visual_info is not None: # If something was selected
+                
+                if self.selected_visual_info is not None:
+                    old_selected_id = self.selected_visual_info['id']
                     self.selected_visual_info = None
-                    self.areaSelectionChangedSignal.emit(None) # Emit deselection
+                    self.areaSelectionChangedSignal.emit(None) 
                 self.update()
             
             elif active_tool == "select_area":
@@ -113,27 +119,24 @@ class InteractivePdfLabel(QLabel):
                 if self.current_pixmap_page_num is not None:
                     rect_infos_on_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
                 
-                # Iterate in reverse for Z-order (topmost first)
                 hits_info = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)]
 
-                newly_selected_info = None
+                newly_selected_info = None 
                 previous_selection_id = self.selected_visual_info['id'] if self.selected_visual_info else None
 
                 if event.modifiers() == Qt.KeyboardModifier.AltModifier and hits_info:
-                    # Convert hits_info to just a list of IDs for cycling if needed, or work with info dicts
-                    # For simplicity, let's find current selected index within hits_info
                     current_sel_index_in_hits = -1
-                    if self.selected_visual_info and self.selected_visual_info in hits_info:
+                    if self.selected_visual_info and self.selected_visual_info in hits_info: 
                         current_sel_index_in_hits = hits_info.index(self.selected_visual_info)
                     
-                    if current_sel_index_in_hits != -1: # Current selection is among hits, cycle
-                        next_index = (current_sel_index_in_hits + 1) % len(hits_info) # Cycle "forwards" through reversed list (visually deeper)
+                    if current_sel_index_in_hits != -1: 
+                        next_index = (current_sel_index_in_hits + 1) % len(hits_info) 
                         newly_selected_info = hits_info[next_index]
-                    elif hits_info: # No current selection in hits, or no selection at all, pick first hit (topmost)
+                    elif hits_info: 
                         newly_selected_info = hits_info[0] 
                 
-                elif not event.modifiers() and hits_info: # Normal click
-                    newly_selected_info = hits_info[0] # Topmost hit
+                elif not event.modifiers() and hits_info: 
+                    newly_selected_info = hits_info[0]
 
                 if previous_selection_id != (newly_selected_info['id'] if newly_selected_info else None):
                     self.selected_visual_info = newly_selected_info
@@ -147,31 +150,41 @@ class InteractivePdfLabel(QLabel):
                      print("InteractivePdfLabel: Selection cleared.")
 
     def paintEvent(self, event):
-        super().paintEvent(event)
+        super().paintEvent(event) # Draw the pixmap
         painter = QPainter(self)
-        
+
         if self.current_pixmap_page_num is not None:
             rect_infos_for_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
-            
+
             for info in rect_infos_for_current_page:
-                rect = info['rect']
+                rect_to_draw = info['rect']
+                area_type = info.get('type', 'text_input') # Default to text_input if type is missing
                 is_selected = (self.selected_visual_info is not None and self.selected_visual_info['id'] == info['id'])
-                
-                if is_selected:
-                    pen_selected = QPen(Qt.GlobalColor.green, 2, Qt.PenStyle.SolidLine)
-                    painter.setPen(pen_selected)
-                else:
-                    pen_defined = QPen(Qt.GlobalColor.blue, 1, Qt.PenStyle.SolidLine)
-                    painter.setPen(pen_defined)
-                
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRect(rect)
-            
+
+                pen_color = Qt.GlobalColor.green if is_selected else Qt.GlobalColor.blue
+                pen_width = 2 if is_selected else 1
+                pen = QPen(pen_color, pen_width, Qt.PenStyle.SolidLine)
+                painter.setPen(pen)
+
+                # **** NEW: Set Brush based on type ****
+                current_brush = QBrush(Qt.BrushStyle.NoBrush) # Default: no fill for text_input
+                if area_type == "signature_area":
+                    # Forward diagonal lines (like /////)
+                    current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.FDiagPattern)
+                elif area_type == "initials_area":
+                    # Backward diagonal lines (like \\\\\)
+                    current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.BDiagPattern)
+
+                painter.setBrush(current_brush)
+                painter.drawRect(rect_to_draw)
+
+        # Draw the current rubber band rectangle (as before)
         if self.current_rubber_band_rect is not None and not self.current_rubber_band_rect.isNull():
             pen_rubber_band = QPen(Qt.GlobalColor.red, 1, Qt.PenStyle.DashLine)
             painter.setPen(pen_rubber_band)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setBrush(Qt.BrushStyle.NoBrush) # Rubber band has no fill
             painter.drawRect(self.current_rubber_band_rect)
+
 
     def mouseMoveEvent(self, event):
         if self.origin_point is not None and self.pixmap(): 
@@ -273,15 +286,15 @@ class DesignerApp(QMainWindow):
         self.save_project_as_action.setEnabled(False) 
         file_menu.addAction(self.save_project_as_action)
 
-
         # --- Toolbar ---
         toolbar = QToolBar("Main Toolbar")
         self.addToolBar(toolbar)
 
         self.tool_action_group = QActionGroup(self)
-        self.tool_action_group.setExclusive(True)
+        self.tool_action_group.setExclusive(True) 
         self.tool_action_group.triggered.connect(self.handleToolSelected)
-        # ... (select_area_action, define_text_area_action as before, added to tool_action_group and toolbar) ...
+
+        # Select Area Action (as before)
         self.select_area_action = QAction("Select Area", self) 
         self.select_area_action.setStatusTip("Select, move, or edit defined areas")
         self.select_area_action.setCheckable(True)
@@ -289,6 +302,7 @@ class DesignerApp(QMainWindow):
         toolbar.addAction(self.select_area_action)
         self.tool_action_group.addAction(self.select_area_action)
 
+        # Define Text Area Action (as before)
         self.define_text_area_action = QAction("Text Area", self)
         self.define_text_area_action.setStatusTip("Define a text input area")
         self.define_text_area_action.setCheckable(True)
@@ -296,17 +310,41 @@ class DesignerApp(QMainWindow):
         toolbar.addAction(self.define_text_area_action)
         self.tool_action_group.addAction(self.define_text_area_action)
 
-        toolbar.addSeparator() # Separator before new actions
+        # **** NEW: Define Signature Area Action ****
+        self.define_signature_area_action = QAction("Signature Area", self)
+        # self.define_signature_area_action.setIcon(QIcon("path/to/signature_icon.png")) # Optional
+        self.define_signature_area_action.setStatusTip("Define a signature area")
+        self.define_signature_area_action.setCheckable(True)
+        self.define_signature_area_action.setData("signature_area") # New tool identifier
+        toolbar.addAction(self.define_signature_area_action)
+        self.tool_action_group.addAction(self.define_signature_area_action)
 
-        # **** NEW: Delete Area Action ****
+        # **** NEW: Define Initials Area Action ****
+        self.define_initials_area_action = QAction("Initials Area", self)
+        # self.define_initials_area_action.setIcon(QIcon("path/to/initials_icon.png")) # Optional
+        self.define_initials_area_action.setStatusTip("Define an initials area")
+        self.define_initials_area_action.setCheckable(True)
+        self.define_initials_area_action.setData("initials_area") # New tool identifier
+        toolbar.addAction(self.define_initials_area_action)
+        self.tool_action_group.addAction(self.define_initials_area_action)
+
+        toolbar.addSeparator()
+
+        # Delete Area Action (as before)
         self.delete_area_action = QAction("Delete Area", self)
-        # self.delete_area_action.setIcon(QIcon("path/to/delete_icon.png")) # Optional icon
+        # ... (rest of delete_area_action setup)
         self.delete_area_action.setStatusTip("Delete the currently selected area")
         self.delete_area_action.triggered.connect(self.deleteSelectedArea)
-        self.delete_area_action.setEnabled(False) # Initially disabled
+        self.delete_area_action.setEnabled(False) 
         toolbar.addAction(self.delete_area_action)
-        
-        # TODO: Add "Edit Area Properties" action later
+
+        # Edit Area Properties Action (as before)
+        self.edit_area_action = QAction("Edit Properties", self)
+        # ... (rest of edit_area_action setup)
+        self.edit_area_action.setStatusTip("Edit properties of the currently selected area")
+        self.edit_area_action.triggered.connect(self.editSelectedAreaProperties)
+        self.edit_area_action.setEnabled(False) 
+        toolbar.addAction(self.edit_area_action)
 
         # --- Controls Widget (as before) ---
         controls_widget = QWidget()
@@ -379,28 +417,32 @@ class DesignerApp(QMainWindow):
     #     self.define_text_area_action.setChecked(False)
 
     def handleAreaSelectionChanged(self, selected_instance_id):
-        self.currently_selected_area_instance_id = selected_instance_id # Store the ID
+        self.currently_selected_area_instance_id = selected_instance_id
 
         if selected_instance_id:
-            # Find the selected area's data (optional, for enabling edit/delete based on properties)
             selected_area_data = next((area for area in self.defined_pdf_areas if area['instance_id'] == selected_instance_id), None)
             
             print(f"DesignerApp: Area selected - Instance ID: {selected_instance_id}")
             if selected_area_data:
-                print(f"   Data Field ID: {selected_area_data['data_field_id']}")
-                print(f"DesignerApp: Area selected - Instance ID: {selected_instance_id}")
-                self.statusBar().showMessage(f"Area {selected_instance_id} selected.", 3000)
-                # Enable Delete/Edit actions
-                if hasattr(self, 'delete_area_action'): 
-                    self.delete_area_action.setEnabled(True)
-                # if hasattr(self, 'edit_area_action'): self.edit_area_action.setEnabled(True) # For later
+                 print(f"   Data Field ID: {selected_area_data['data_field_id']}")
+            self.statusBar().showMessage(f"Area {selected_instance_id} selected.", 3000)
+            
+            # Enable Delete/Edit actions
+            if hasattr(self, 'delete_area_action'): 
+                self.delete_area_action.setEnabled(True)
+            if hasattr(self, 'edit_area_action'): 
+                self.edit_area_action.setEnabled(True)
 
         else: # None was passed (or empty string), meaning selection was cleared
             print("DesignerApp: Selection cleared.")
             self.statusBar().showMessage("Selection cleared.", 3000)
+
             # Disable Delete/Edit actions
             if hasattr(self, 'delete_area_action'): 
                 self.delete_area_action.setEnabled(False)
+            # **** ENSURE THIS LINE IS PRESENT AND CORRECT ****
+            if hasattr(self, 'edit_area_action'): 
+                self.edit_area_action.setEnabled(False) 
 
     def _reset_pdf_display_label(self, message="PDF page will appear here"):
         print("Attempting _reset_pdf_display_label...") # For debugging
@@ -442,18 +484,23 @@ class DesignerApp(QMainWindow):
             self.next_page_button.setEnabled(False)
 
     def _get_view_rects_for_page(self, page_num):
-        view_rect_infos = [] # Will now be list of {'rect': QRect, 'id': str}
+        view_rect_infos = [] 
         if not self.pdf_document:
             return view_rect_infos
         matrix = fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
-        for area_info in self.defined_pdf_areas:
+        for area_info in self.defined_pdf_areas: # area_info is a dict from our stored list
             if area_info['page_num'] == page_num:
                 pdf_coords = area_info['rect_pdf']
                 pdf_fitz_rect = fitz.Rect(pdf_coords[0], pdf_coords[1], pdf_coords[2], pdf_coords[3])
                 view_fitz_rect = pdf_fitz_rect * matrix
                 view_qrect = QRect(round(view_fitz_rect.x0), round(view_fitz_rect.y0),
-                                   round(view_fitz_rect.width), round(view_fitz_rect.height))
-                view_rect_infos.append({'rect': view_qrect, 'id': area_info['instance_id']})
+                                round(view_fitz_rect.width), round(view_fitz_rect.height))
+                # **** CHANGE: Include type ****
+                view_rect_infos.append({
+                    'rect': view_qrect, 
+                    'id': area_info['instance_id'],
+                    'type': area_info['type'] # Get type from stored data
+                })
         return view_rect_infos
 
     def displayPdfPage(self, page_num): # Revised structure for clarity
@@ -486,7 +533,7 @@ class DesignerApp(QMainWindow):
             self.pdf_display_label.clearDefinedRects() 
             view_rect_infos_for_this_page = self._get_view_rects_for_page(page_num)
             for info in view_rect_infos_for_this_page:
-                self.pdf_display_label.addVisualRect(page_num, info['rect'], info['id'])
+                self.pdf_display_label.addVisualRect(page_num, info['rect'], info['id'], info['type'])
             # The label's own selected_visual_info will be None due to setCurrentPixmapPage or clearDefinedRects
             # or if it's re-selected, mousePressEvent will handle it.
 
@@ -506,74 +553,79 @@ class DesignerApp(QMainWindow):
             # self.currently_selected_area_instance_id = None # Already handled by _reset
             self._updateNavigation()
 
-    def handleRectDefined(self, view_qrect): # view_qrect is the QRect from the signal
+    def handleRectDefined(self, view_qrect):
         if not self.pdf_document or self.pdf_display_label.current_pixmap_page_num is None:
             return 
         
         current_tool_page = self.pdf_display_label.current_pixmap_page_num
+        tool_type_for_dialog = ""
+        default_name_prefix = ""
+        area_data_type_string = ""
 
         if self.current_drawing_tool == "text_area":
-            # Prepare initial values for the dialog. These will be updated if the user makes an error
-            # and the dialog needs to re-appear with previously entered data.
-            # For the very first time, we can suggest a default name or leave it blank.
-            suggested_data_field_id = f"TextArea_{len(self.defined_pdf_areas) + 1}" # Optional suggestion
-            current_prompt_text = "" # Start with an empty prompt
+            tool_type_for_dialog = "Text Input"
+            default_name_prefix = "TextArea"
+            area_data_type_string = "text_input"
+        elif self.current_drawing_tool == "signature_area":
+            tool_type_for_dialog = "Signature Area"
+            default_name_prefix = "SignatureArea"
+            area_data_type_string = "signature_area"
+        elif self.current_drawing_tool == "initials_area": # **** NEW elif block ****
+            tool_type_for_dialog = "Initials Area"
+            default_name_prefix = "InitialsArea"
+            area_data_type_string = "initials_area"
+        else:
+            print(f"Rectangle defined with no active drawing tool or unknown tool: {self.current_drawing_tool}")
+            return # Do not proceed
 
-            while True: # Loop until dialog is accepted with valid data, or cancelled
-                dialog = AreaPropertiesDialog(
-                    area_type="Text Input", 
-                    default_data_field_id=suggested_data_field_id, # Pass the current/suggested ID
-                    default_prompt=current_prompt_text,           # Pass the current prompt
-                    parent=self
-                )
+        # Common logic for dialog and processing
+        suggested_data_field_id = f"{default_name_prefix}_{len(self.defined_pdf_areas) + 1}"
+        current_prompt_text = ""
 
-                if dialog.exec() == QDialog.DialogCode.Accepted:
-                    properties = dialog.getProperties()
-                    
-                    # Preserve entered values for potential next iteration of the dialog
-                    suggested_data_field_id = properties["data_field_id"] if properties else suggested_data_field_id
-                    current_prompt_text = properties["prompt"] if properties else current_prompt_text
+        while True:
+            dialog = AreaPropertiesDialog(
+                area_type=tool_type_for_dialog, 
+                default_data_field_id=suggested_data_field_id,
+                default_prompt=current_prompt_text,          
+                parent=self
+            )
 
-                    if properties and properties["data_field_id"]: # Ensure a name was provided
-                        # Valid input: Proceed to create and store the area information
-                        inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
-                        view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
-                                                   view_qrect.right(), view_qrect.bottom())
-                        pdf_fitz_rect = view_fitz_rect * inverse_matrix
-                        
-                        instance_id = f"inst_{uuid.uuid4().hex[:8]}" 
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                properties = dialog.getProperties()
+                suggested_data_field_id = properties["data_field_id"] if properties else suggested_data_field_id
+                current_prompt_text = properties["prompt"] if properties else current_prompt_text
 
-                        defined_area_info = {
-                            'instance_id': instance_id, # Already here
-                            'page_num': current_tool_page,
-                            'rect_pdf': tuple(pdf_fitz_rect.irect), 
-                            'data_field_id': properties["data_field_id"],
-                            'type': "text_input", 
-                            'prompt': properties["prompt"],
-                            'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), # **** NEW: Store view QRect as tuple ****
+                if properties and properties["data_field_id"]:
+                    inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+                    view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
+                                               view_qrect.right(), view_qrect.bottom())
+                    pdf_fitz_rect = view_fitz_rect * inverse_matrix
+                    instance_id = f"inst_{uuid.uuid4().hex[:8]}"
+
+                    defined_area_info = {
+                        'instance_id': instance_id,
+                        'page_num': current_tool_page,
+                        'rect_pdf': tuple(pdf_fitz_rect.irect), 
+                        'data_field_id': properties["data_field_id"],
+                        'type': area_data_type_string, # This is "text_input", "signature_area", or "initials_area"
+                        'prompt': properties["prompt"],
+                        'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), 
                                             view_qrect.width(), view_qrect.height())
-                        }
-                        self.defined_pdf_areas.append(defined_area_info)
+                    }
+                    self.defined_pdf_areas.append(defined_area_info)
 
-                        print(f"Area Defined and Accepted (Instance ID: {instance_id}):")
-                        # ... (other print statements)
+                    print(f"Area Defined ({area_data_type_string}) and Accepted (Instance ID: {instance_id}):")
+                    print(f"  Data Field ID: {properties['data_field_id']}, Prompt: {properties['prompt']}")
+                    print(f"  Total Defined Areas: {len(self.defined_pdf_areas)}")
 
-                        # Pass instance_id along with view_qrect to addVisualRect
-                        self.pdf_display_label.addVisualRect(current_tool_page, view_qrect, instance_id) 
-                        break
-
-                    else: # Dialog accepted, but data_field_id was empty
-                        QMessageBox.warning(self, "Missing Information", 
-                                            "Data Field Name / Link ID cannot be empty. Please try again.")
-                        # Loop continues, dialog will re-appear.
-                        # suggested_data_field_id will be empty, current_prompt_text will retain its value.
-                
-                else: # Dialog was cancelled (QDialog.DialogCode.Rejected)
-                    print("Area definition cancelled by user.")
-                    break # Exit the while loop, area not defined
-        
-        # else: (no active drawing tool) - no changes needed here
-            pass
+                    self.pdf_display_label.addVisualRect(current_tool_page, view_qrect, instance_id, area_data_type_string)
+                    break 
+                else: 
+                    QMessageBox.warning(self, "Missing Information", 
+                                        "Data Field Name / Link ID cannot be empty. Please try again.")
+            else: 
+                print(f"Area definition ({area_data_type_string}) cancelled by user.")
+                break 
 
     def openPdfFile(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open PDF File", "", 
@@ -848,21 +900,18 @@ class DesignerApp(QMainWindow):
             self.newProject() # Reset to a clean state on generic error
 
 
+# ... (Inside DesignerApp class)
+
     def handleToolSelected(self, action):
         new_tool_id = action.data()
         old_tool_id = self.current_drawing_tool
 
-        # If a selection was active and we are either changing away from the select tool,
-        # OR if we are changing to a tool that isn't the select tool (e.g. a drawing tool)
+        # Clear selection if switching tools and something was selected
         if self.currently_selected_area_instance_id is not None:
-            if old_tool_id == "select_area" and new_tool_id != "select_area":
-                # Switched away from select tool while something was selected
-                self.clearCurrentSelection()
-            elif new_tool_id == "text_area": # Explicitly clear if switching TO text_area
-                self.clearCurrentSelection()
-            # Add elif for other drawing tools here if they should also clear selection
+            if new_tool_id != "select_area" or (old_tool_id == "select_area" and old_tool_id != new_tool_id) :
+                self.clearCurrentSelection() 
 
-        self.current_drawing_tool = new_tool_id
+        self.current_drawing_tool = new_tool_id # Set the new tool
         
         if new_tool_id == "select_area":
             self.info_label.setText("Mode: Select Area. Click on an existing area to select.")
@@ -872,15 +921,23 @@ class DesignerApp(QMainWindow):
             self.info_label.setText("Mode: Define Text Area. Click and drag on the PDF.")
             self.pdf_display_label.setCursor(Qt.CursorShape.CrossCursor)
             print("Text Area tool active")
-        else: # Default case or unknown tool
-            self.current_drawing_tool = None # Or default to select_area?
-            # If defaulting to select_area, call self.select_area_action.setChecked(True)
-            # For now, let's allow no tool to be selected if logic leads here.
-            self.info_label.setText("No specific tool selected.")
+        elif new_tool_id == "signature_area":
+            self.info_label.setText("Mode: Define Signature Area. Click and drag on the PDF.")
+            self.pdf_display_label.setCursor(Qt.CursorShape.CrossCursor)
+            print("Signature Area tool active")
+        # **** ADD THIS ELIF BLOCK ****
+        elif new_tool_id == "initials_area":
+            self.info_label.setText("Mode: Define Initials Area. Click and drag on the PDF.")
+            self.pdf_display_label.setCursor(Qt.CursorShape.CrossCursor)
+            print("Initials Area tool active")
+        else: 
+            # This case should ideally not be reached if all toolbar actions have valid setData
+            self.current_drawing_tool = None 
+            self.info_label.setText("No specific tool selected. Load PDF or select a tool.")
             self.pdf_display_label.setCursor(Qt.CursorShape.ArrowCursor)
-            if self.currently_selected_area_instance_id: # If an unknown state leads here, clear selection
+            if self.currently_selected_area_instance_id: # Clear selection if falling back
                 self.clearCurrentSelection()
-            print("No tool or unknown tool active")
+            print("No tool or unknown tool active (tool_id: '{new_tool_id}')") # Added tool_id to print for debugging
 
     def clearCurrentSelection(self):
         """Helper to clear the current selection state."""
@@ -965,6 +1022,64 @@ class DesignerApp(QMainWindow):
 
         # Call the base class implementation for any other key events
         super().keyPressEvent(event)
+
+    def editSelectedAreaProperties(self):
+        if not self.currently_selected_area_instance_id:
+            QMessageBox.information(self, "Edit Properties", "No area selected to edit.")
+            return
+
+        selected_id = self.currently_selected_area_instance_id
+        area_data_to_edit = None
+        area_index = -1
+
+        # Find the area in the data model
+        for i, area_info in enumerate(self.defined_pdf_areas):
+            if area_info['instance_id'] == selected_id:
+                area_data_to_edit = area_info
+                area_index = i
+                break
+        
+        if not area_data_to_edit:
+            QMessageBox.warning(self, "Error", f"Could not find data for selected area ID {selected_id} to edit.")
+            # This state implies an inconsistency, clear selection.
+            self.handleAreaSelectionChanged(None) 
+            if self.pdf_display_label.selected_visual_info and \
+               self.pdf_display_label.selected_visual_info.get('id') == selected_id:
+                self.pdf_display_label.selected_visual_info = None
+                self.pdf_display_label.update()
+            return
+
+        # Pre-fill the dialog with existing properties
+        dialog = AreaPropertiesDialog(
+            area_type=area_data_to_edit.get('type', 'Text Input'), # Get type from data
+            default_data_field_id=area_data_to_edit.get('data_field_id', ''),
+            default_prompt=area_data_to_edit.get('prompt', ''),
+            parent=self
+        )
+        dialog.setWindowTitle(f"Edit Area Properties (ID: {selected_id})") # Update dialog title
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_properties = dialog.getProperties()
+            if new_properties and new_properties["data_field_id"]: # Ensure new data_field_id is not empty
+                # Update the existing dictionary in self.defined_pdf_areas
+                self.defined_pdf_areas[area_index]['data_field_id'] = new_properties['data_field_id']
+                self.defined_pdf_areas[area_index]['prompt'] = new_properties['prompt']
+                # Type is not editable in this dialog for now, so it remains unchanged.
+                # instance_id, page_num, rect_pdf, view_qrect_tuple also remain unchanged by this edit.
+
+                print(f"Properties updated for area {selected_id}:")
+                print(f"  New Data Field ID: {new_properties['data_field_id']}")
+                print(f"  New Prompt: {new_properties['prompt']}")
+                self.statusBar().showMessage(f"Properties for area {selected_id} updated.", 3000)
+                # TODO (Advanced): If data_field_id changed, and if we had color-coding by family,
+                # we might need to tell InteractivePdfLabel to update the color of this visual rect.
+                # For now, the blue box's appearance doesn't change based on this metadata edit.
+                # Also, mark project as "dirty" / needing save.
+            else:
+                QMessageBox.warning(self, "Missing Information", 
+                                    "Data Field Name / Link ID cannot be empty. Properties not updated.")
+        else:
+            print(f"Editing properties for area {selected_id} cancelled.")
 
 # Main function remains the same
 def main():
