@@ -69,6 +69,7 @@ class InteractivePdfLabel(QLabel):
     rectDefinedSignal = pyqtSignal(QRect)
     # **** CHANGE: Signal now emits instance_id (str) or None ****
     areaSelectionChangedSignal = pyqtSignal(str) # Emits instance_id or empty string/None for deselection
+    areaMovedSignal = pyqtSignal(str, QRect) # instance_id, new_view_qrect
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,6 +80,10 @@ class InteractivePdfLabel(QLabel):
         self.page_visual_rects = {} # Key: page_num, Value: list of {'rect': QRect, 'id': str, 'type': str}
         self.current_pixmap_page_num = None
         self.selected_visual_info = None # Stores a selected {'rect': QRect, 'id': str, 'type': str} dict
+        self.is_moving_selection = False
+        self.drag_start_mouse_pos = None     # QPoint: Mouse position when drag started
+        self.drag_start_rect_pos = None    # QPoint: Top-left of rect when drag started
+
 
 
     # **** NEW METHOD ****
@@ -96,58 +101,127 @@ class InteractivePdfLabel(QLabel):
             self.update()
 
     def mousePressEvent(self, event):
-        print(f"InteractivePdfLabel.mousePressEvent: Active tool from parent: '{self.parent_widget.current_drawing_tool}'")
-        if event.button() == Qt.MouseButton.LeftButton and self.pixmap() and self.parent_widget:
+        # Initial debug print (as you added)
+        if self.parent_widget and hasattr(self.parent_widget, 'current_drawing_tool'):
+            print(f"InteractivePdfLabel.mousePressEvent: Active tool from parent: '{self.parent_widget.current_drawing_tool}'")
+        else:
+            print("InteractivePdfLabel.mousePressEvent: Parent widget or current_drawing_tool not available.")
+            return # Cannot proceed without parent context for tool
+
+        if event.button() == Qt.MouseButton.LeftButton and self.pixmap():
             active_tool = self.parent_widget.current_drawing_tool
             click_pos = event.pos()
 
-            # Check if the active tool is one of the tools that should initiate drawing
-
-            drawing_tools = ["text_area", "signature_area", "initials_area"] 
+            drawing_tools = ["text_area", "signature_area", "initials_area"]
             if active_tool in drawing_tools:
                 self.origin_point = click_pos
                 self.current_rubber_band_rect = QRect(self.origin_point, self.origin_point)
-                
                 if self.selected_visual_info is not None:
-                    old_selected_id = self.selected_visual_info['id']
                     self.selected_visual_info = None
-                    self.areaSelectionChangedSignal.emit(None) 
+                    self.areaSelectionChangedSignal.emit(None)
                 self.update()
             
             elif active_tool == "select_area":
+                # ... (Your existing, working selection and Alt+Click logic for "select_area" tool)
+                # This block should remain unchanged from when it was working perfectly for selection.
                 rect_infos_on_current_page = []
                 if self.current_pixmap_page_num is not None:
                     rect_infos_on_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
                 
-                hits_info = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)]
+                hits_info_dicts = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)] # List of dicts
+                # Convert to list of QRects for cycling if your previous Alt+Click logic used list of QRects for hits.
+                # Or, adapt cycling to work with list of dicts. Let's assume hits_info_dicts is what we need for cycling.
 
-                newly_selected_info = None 
+                newly_selected_info_dict = None 
                 previous_selection_id = self.selected_visual_info['id'] if self.selected_visual_info else None
 
-                if event.modifiers() == Qt.KeyboardModifier.AltModifier and hits_info:
+                if event.modifiers() == Qt.KeyboardModifier.AltModifier and hits_info_dicts:
                     current_sel_index_in_hits = -1
-                    if self.selected_visual_info and self.selected_visual_info in hits_info: 
-                        current_sel_index_in_hits = hits_info.index(self.selected_visual_info)
+                    if self.selected_visual_info and self.selected_visual_info in hits_info_dicts: 
+                        current_sel_index_in_hits = hits_info_dicts.index(self.selected_visual_info)
                     
                     if current_sel_index_in_hits != -1: 
-                        next_index = (current_sel_index_in_hits + 1) % len(hits_info) 
-                        newly_selected_info = hits_info[next_index]
-                    elif hits_info: 
-                        newly_selected_info = hits_info[0] 
+                        next_index = (current_sel_index_in_hits + 1) % len(hits_info_dicts) # Your cycling logic for select tool
+                        newly_selected_info_dict = hits_info_dicts[next_index]
+                    elif hits_info_dicts: 
+                        newly_selected_info_dict = hits_info_dicts[0] 
                 
-                elif not event.modifiers() and hits_info: 
-                    newly_selected_info = hits_info[0]
+                elif not event.modifiers() and hits_info_dicts: 
+                    newly_selected_info_dict = hits_info_dicts[0] # Topmost hit
 
-                if previous_selection_id != (newly_selected_info['id'] if newly_selected_info else None):
-                    self.selected_visual_info = newly_selected_info
+                if previous_selection_id != (newly_selected_info_dict['id'] if newly_selected_info_dict else None):
+                    self.selected_visual_info = newly_selected_info_dict
                     self.areaSelectionChangedSignal.emit(self.selected_visual_info['id'] if self.selected_visual_info else None)
                     self.update()
-
-                # Print for debugging
+                
+                # Your debug print block (ensure it's correctly indented within this elif)
                 if self.selected_visual_info:
-                    print(f"InteractivePdfLabel: Area selected - ID: {self.selected_visual_info['id']}")
-                elif previous_selection_id is not None and newly_selected_info is None:
-                     print("InteractivePdfLabel: Selection cleared.")
+                    print(f"InteractivePdfLabel: Area selected by SelectTool - ID: {self.selected_visual_info['id']}")
+                elif previous_selection_id is not None and newly_selected_info_dict is None:
+                     print("InteractivePdfLabel: Selection cleared by SelectTool.")
+
+
+            elif active_tool == "move_area":
+                target_to_move_info = None # This will be the info dict {'rect': QRect, 'id': str, 'type': str}
+                previous_selection_id = self.selected_visual_info['id'] if self.selected_visual_info else None
+                selection_changed_by_this_press = False
+
+                rect_infos_on_current_page = []
+                if self.current_pixmap_page_num is not None:
+                    rect_infos_on_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
+
+                if event.modifiers() == Qt.KeyboardModifier.AltModifier:
+                    # Alt+Click with Move tool: Cycle selection, then prepare to move
+                    hits_info_dicts = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)]
+                    if hits_info_dicts:
+                        current_sel_index_in_hits = -1
+                        if self.selected_visual_info and self.selected_visual_info in hits_info_dicts:
+                            current_sel_index_in_hits = hits_info_dicts.index(self.selected_visual_info)
+                        
+                        if current_sel_index_in_hits != -1: # Cycle from current selection among hits
+                            next_index = (current_sel_index_in_hits + 1) % len(hits_info_dicts)
+                            target_to_move_info = hits_info_dicts[next_index]
+                        else: # No current selection in hits, or no selection at all, pick first hit (topmost)
+                            target_to_move_info = hits_info_dicts[0]
+                        
+                        print(f"MoveTool+Alt: Cycled to ID: {target_to_move_info['id'] if target_to_move_info else 'None'}")
+                    # If no hits with Alt, target_to_move_info remains None
+                
+                else: # Normal Click (no Alt) with Move tool
+                    # Priority 1: Is the click on the *currently selected* item?
+                    if self.selected_visual_info and self.selected_visual_info['rect'].contains(click_pos):
+                        target_to_move_info = self.selected_visual_info
+                        print(f"MoveTool: Moving already selected ID: {target_to_move_info['id']}")
+                    else:
+                        # Priority 2: Clicked not on current selection (or nothing selected), find topmost under cursor
+                        hits_info_dicts = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)]
+                        if hits_info_dicts:
+                            target_to_move_info = hits_info_dicts[0] # Topmost
+                            print(f"MoveTool: Selected topmost ID: {target_to_move_info['id']} for move.")
+                        # If no hits (clicked empty space), target_to_move_info remains None
+
+                # Update selection state if it changed due to the (Alt)Click
+                if target_to_move_info:
+                    if not self.selected_visual_info or self.selected_visual_info['id'] != target_to_move_info['id']:
+                        self.selected_visual_info = target_to_move_info
+                        self.areaSelectionChangedSignal.emit(self.selected_visual_info['id'])
+                        selection_changed_by_this_press = True # Selection changed, needs update
+                elif self.selected_visual_info: # Clicked empty space, but something was selected
+                    self.selected_visual_info = None
+                    self.areaSelectionChangedSignal.emit(None)
+                    selection_changed_by_this_press = True
+
+                # Now, if a target was identified (and is now selected), prepare for moving
+                if target_to_move_info: # target_to_move_info is now self.selected_visual_info
+                    self.is_moving_selection = True
+                    self.drag_start_mouse_pos = click_pos
+                    self.drag_start_rect_pos = self.selected_visual_info['rect'].topLeft()
+                    self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    print(f"Move initiated for ID: {self.selected_visual_info['id']}")
+                    if not selection_changed_by_this_press: # If selection didn't change but we start move
+                        self.update() # Ensure visual cues for move (like cursor) take effect if selection didn't change
+                elif selection_changed_by_this_press: # Clicked empty, selection cleared
+                    self.update() # Ensure deselection is painted
 
     def paintEvent(self, event):
         super().paintEvent(event) # Draw the pixmap
@@ -187,34 +261,57 @@ class InteractivePdfLabel(QLabel):
 
 
     def mouseMoveEvent(self, event):
-        if self.origin_point is not None and self.pixmap(): 
+        # Handle rubber band drawing for defining new areas
+        if self.origin_point is not None and self.current_rubber_band_rect is not None and \
+           self.parent_widget and self.parent_widget.current_drawing_tool in ["text_area", "signature_area", "initials_area"]:
             current_pos = event.pos()
             self.current_rubber_band_rect = QRect(self.origin_point, current_pos).normalized()
             self.update()
+        
+        # **** NEW: Handle moving an existing selected area ****
+        elif self.is_moving_selection and self.selected_visual_info:
+            mouse_delta = event.pos() - self.drag_start_mouse_pos
+            new_top_left = self.drag_start_rect_pos + mouse_delta
+            
+            # Update the 'rect' QRect object directly. Since it's a reference
+            # to the one in page_visual_rects, that list will also see the change.
+            self.selected_visual_info['rect'].moveTo(new_top_left)
+            self.update() # Trigger repaint to show the rectangle moving
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and \
-           self.origin_point is not None and \
-           self.current_rubber_band_rect is not None and \
-           self.pixmap() and \
-           self.current_pixmap_page_num is not None: # Ensure we know the page
-
-            final_rect_view = self.current_rubber_band_rect.normalized()
-            
-            if final_rect_view.width() > 0 and final_rect_view.height() > 0:
-                # Emit signal with the current page number and the view rectangle
-                # We'll let DesignerApp tell us to add it visually via addVisualRect
-                self.rectDefinedSignal.emit(final_rect_view) # Signal remains the same for now
-                                                              # DesignerApp knows the current page
-            
-            self.origin_point = None
-            self.current_rubber_band_rect = None
-            self.update()
-        else:
-            self.origin_point = None
-            self.current_rubber_band_rect = None
-            if self.pixmap():
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Finalize defining a new area (rubber band)
+            if self.origin_point is not None and self.current_rubber_band_rect is not None and \
+               self.current_pixmap_page_num is not None and self.parent_widget and \
+               self.parent_widget.current_drawing_tool in ["text_area", "signature_area", "initials_area"]:
+                
+                final_rect_view = self.current_rubber_band_rect.normalized()
+                if final_rect_view.width() > 0 and final_rect_view.height() > 0:
+                    self.rectDefinedSignal.emit(final_rect_view)
+                
+                self.origin_point = None
+                self.current_rubber_band_rect = None
                 self.update()
+
+            # **** NEW: Finalize moving a selection ****
+            elif self.is_moving_selection and self.selected_visual_info:
+                instance_id = self.selected_visual_info['id']
+                new_view_qrect = self.selected_visual_info['rect'] # This is the updated rect
+
+                print(f"Move ended for ID: {instance_id}. New view QRect: {new_view_qrect}")
+                self.areaMovedSignal.emit(instance_id, new_view_qrect) # Emit signal to DesignerApp
+                
+                self.is_moving_selection = False
+                self.drag_start_mouse_pos = None
+                self.drag_start_rect_pos = None
+                # Cursor will be reset by DesignerApp when tool mode is confirmed or changed
+                # Or set it back to OpenHand for the move tool here:
+                if self.parent_widget and self.parent_widget.current_drawing_tool == "move_area":
+                    self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
+                self.update() # Ensure final position is painted
+            
+            # If it was a click for selection and not a move, state is already handled by mousePress
+            # No explicit else needed here if mousePress handled selection updates.
 
     def clearDefinedRects(self):
         self.page_visual_rects = {}
@@ -244,7 +341,7 @@ class DesignerApp(QMainWindow):
         self.current_drawing_tool = None # Will be set in initUI or by tool selection
         self.currently_selected_area_instance_id = None # **** NEW/REPURPOSED ****
         self.initUI()
-        self.setSelectToolActive()
+        #self.setSelectToolActive() #commented out to remove the activation
 
     def initUI(self):
         # ... (setWindowTitle, setGeometry, central_widget, main_layout, menubar, toolbar as before) ...
@@ -328,6 +425,14 @@ class DesignerApp(QMainWindow):
         toolbar.addAction(self.define_initials_area_action)
         self.tool_action_group.addAction(self.define_initials_area_action)
 
+        self.move_area_action = QAction("Move Area", self)
+        # self.move_area_action.setIcon(QIcon("path/to/move_icon.png")) # Optional icon
+        self.move_area_action.setStatusTip("Move an existing defined area")
+        self.move_area_action.setCheckable(True)
+        self.move_area_action.setData("move_area") # New tool identifier
+        toolbar.addAction(self.move_area_action)
+        self.tool_action_group.addAction(self.move_area_action)
+
         toolbar.addSeparator()
 
         # Delete Area Action (as before)
@@ -388,9 +493,12 @@ class DesignerApp(QMainWindow):
         main_layout.addWidget(self.scroll_area)
         main_layout.setStretchFactor(self.scroll_area, 1)
 
-        self.statusBar().showMessage("Ready")
-        # self.setLayout(main_layout) # Not needed for QMainWindow's central widget
+        # Explicitly set initial UI state reflecting no tool is active
+        self.info_label.setText("Select a tool from the toolbar or load a PDF.")
+        self.pdf_display_label.setCursor(Qt.CursorShape.ArrowCursor)
 
+        # The status bar is already set to "Ready"
+        # self.statusBar().showMessage("Ready")
 
     def setTextAreaTool(self, checked):
         if checked:
@@ -925,11 +1033,14 @@ class DesignerApp(QMainWindow):
             self.info_label.setText("Mode: Define Signature Area. Click and drag on the PDF.")
             self.pdf_display_label.setCursor(Qt.CursorShape.CrossCursor)
             print("Signature Area tool active")
-        # **** ADD THIS ELIF BLOCK ****
         elif new_tool_id == "initials_area":
             self.info_label.setText("Mode: Define Initials Area. Click and drag on the PDF.")
             self.pdf_display_label.setCursor(Qt.CursorShape.CrossCursor)
             print("Initials Area tool active")
+        elif new_tool_id == "move_area":
+            self.info_label.setText("Mode: Move Area. Click and drag an existing area to move it.")
+            self.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor) # Or SizeAllCursor
+            print("Move Area tool active")
         else: 
             # This case should ideally not be reached if all toolbar actions have valid setData
             self.current_drawing_tool = None 
