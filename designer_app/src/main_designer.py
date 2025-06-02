@@ -65,26 +65,69 @@ class AreaPropertiesDialog(QDialog):
             }
         return None # Or raise an exception, or return an empty dict
 
+# For handle identification
+HANDLE_SIZE = 8
+H_TOP_LEFT, H_TOP_MIDDLE, H_TOP_RIGHT, \
+H_MIDDLE_LEFT, H_MIDDLE_RIGHT, \
+H_BOTTOM_LEFT, H_BOTTOM_MIDDLE, H_BOTTOM_RIGHT = range(8)
+
 class InteractivePdfLabel(QLabel):
     rectDefinedSignal = pyqtSignal(QRect)
-    # **** CHANGE: Signal now emits instance_id (str) or None ****
-    areaSelectionChangedSignal = pyqtSignal(str) # Emits instance_id or empty string/None for deselection
-    areaMovedSignal = pyqtSignal(str, QRect) # instance_id, new_view_qrect
+    areaSelectionChangedSignal = pyqtSignal(object)
+    areaMovedSignal = pyqtSignal(str, QRect)
+    # **** NEW: Signal for when a resize is completed ****
+    areaResizedSignal = pyqtSignal(str, QRect) # instance_id, new_view_qrect
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_widget = parent
+        self.setMouseTracking(True) # **** NEW: Enable mouse tracking for hover events ****
+        
         self.current_rubber_band_rect = None
         self.origin_point = None      
-        # **** CHANGE: Store dicts with 'rect', 'id', AND 'type' ****
-        self.page_visual_rects = {} # Key: page_num, Value: list of {'rect': QRect, 'id': str, 'type': str}
+        self.page_visual_rects = {} 
         self.current_pixmap_page_num = None
-        self.selected_visual_info = None # Stores a selected {'rect': QRect, 'id': str, 'type': str} dict
+        self.selected_visual_info = None # Stores {'rect': QRect, 'id': str, 'type': str}
+
         self.is_moving_selection = False
-        self.drag_start_mouse_pos = None     # QPoint: Mouse position when drag started
-        self.drag_start_rect_pos = None    # QPoint: Top-left of rect when drag started
+        self.drag_start_mouse_pos = None     
+        self.drag_start_rect_pos = None   
 
+        # **** NEW: Attributes for resizing ****
+        self.is_resizing_selection = False
+        self.active_resize_handle = None # Stores which handle is being dragged (e.g., H_TOP_LEFT)
+        self.resize_start_mouse_pos = None # Mouse pos when resize started
+        self.resize_start_rect = None      # QRect: Geometry of rect when resize started
 
+    def _get_handle_rects(self, base_rect):
+        """Returns a dictionary of QRects for the 8 resize handles of a given base_rect."""
+        if not base_rect or base_rect.isNull():
+            return {}
+
+        hs = HANDLE_SIZE
+        hs_half = hs // 2
+
+        handles = {
+            H_TOP_LEFT: QRect(base_rect.left() - hs_half, base_rect.top() - hs_half, hs, hs),
+            H_TOP_MIDDLE: QRect(base_rect.center().x() - hs_half, base_rect.top() - hs_half, hs, hs),
+            H_TOP_RIGHT: QRect(base_rect.right() - hs_half + 1, base_rect.top() - hs_half, hs, hs), # +1 for visual alignment
+            
+            H_MIDDLE_LEFT: QRect(base_rect.left() - hs_half, base_rect.center().y() - hs_half, hs, hs),
+            H_MIDDLE_RIGHT: QRect(base_rect.right() - hs_half + 1, base_rect.center().y() - hs_half, hs, hs),
+
+            H_BOTTOM_LEFT: QRect(base_rect.left() - hs_half, base_rect.bottom() - hs_half + 1, hs, hs),
+            H_BOTTOM_MIDDLE: QRect(base_rect.center().x() - hs_half, base_rect.bottom() - hs_half + 1, hs, hs),
+            H_BOTTOM_RIGHT: QRect(base_rect.right() - hs_half + 1, base_rect.bottom() - hs_half + 1, hs, hs),
+        }
+        return handles
+
+    def _get_handle_at_pos(self, pos, base_rect):
+        """Checks if pos is over any handle of base_rect. Returns handle ID or None."""
+        handle_rects = self._get_handle_rects(base_rect)
+        for handle_id, handle_r in handle_rects.items():
+            if handle_r.contains(pos):
+                return handle_id
+        return None
 
     # **** NEW METHOD ****
     def setCurrentPixmapPage(self, page_num):
@@ -122,8 +165,19 @@ class InteractivePdfLabel(QLabel):
                 self.update()
             
             elif active_tool == "select_area":
-                # ... (Your existing, working selection and Alt+Click logic for "select_area" tool)
-                # This block should remain unchanged from when it was working perfectly for selection.
+                # Check for handle grab FIRST if an item is selected
+                if self.selected_visual_info and self.selected_visual_info['rect']:
+                    clicked_handle = self._get_handle_at_pos(click_pos, self.selected_visual_info['rect'])
+                    if clicked_handle is not None:
+                        self.is_resizing_selection = True
+                        self.active_resize_handle = clicked_handle
+                        self.resize_start_mouse_pos = click_pos
+                        self.resize_start_rect = QRect(self.selected_visual_info['rect']) # Copy
+                        self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.PointingHandCursor) # Or specific resize cursor
+                        print(f"Resize initiated from handle: {clicked_handle}")
+                        self.update()
+                        return # Resize initiated, skip normal selection logic
+
                 rect_infos_on_current_page = []
                 if self.current_pixmap_page_num is not None:
                     rect_infos_on_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
@@ -162,6 +216,18 @@ class InteractivePdfLabel(QLabel):
 
 
             elif active_tool == "move_area":
+                # Check for handle grab FIRST if an item is selected for moving
+                if self.selected_visual_info and self.selected_visual_info['rect']:
+                    clicked_handle = self._get_handle_at_pos(click_pos, self.selected_visual_info['rect'])
+                    if clicked_handle is not None:
+                        self.is_resizing_selection = True
+                        self.active_resize_handle = clicked_handle
+                        self.resize_start_mouse_pos = click_pos
+                        self.resize_start_rect = QRect(self.selected_visual_info['rect']) # Copy
+                        self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.PointingHandCursor) # Or specific resize cursor
+                        print(f"Resize initiated (from MoveTool) from handle: {clicked_handle}")
+                        self.update()
+                        return # Resize initiated
                 target_to_move_info = None # This will be the info dict {'rect': QRect, 'id': str, 'type': str}
                 previous_selection_id = self.selected_visual_info['id'] if self.selected_visual_info else None
                 selection_changed_by_this_press = False
@@ -230,88 +296,174 @@ class InteractivePdfLabel(QLabel):
         if self.current_pixmap_page_num is not None:
             rect_infos_for_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
 
+            # 1. Draw all defined visual rectangles with their type-specific styles
             for info in rect_infos_for_current_page:
                 rect_to_draw = info['rect']
-                area_type = info.get('type', 'text_input') # Default to text_input if type is missing
-                is_selected = (self.selected_visual_info is not None and self.selected_visual_info['id'] == info['id'])
+                area_type = info.get('type', 'text_input')
+                
+                # Determine if this rectangle is the currently selected one
+                is_selected = (self.selected_visual_info is not None and 
+                               self.selected_visual_info['id'] == info['id'])
 
+                # Set pen based on selection state
                 pen_color = Qt.GlobalColor.green if is_selected else Qt.GlobalColor.blue
                 pen_width = 2 if is_selected else 1
                 pen = QPen(pen_color, pen_width, Qt.PenStyle.SolidLine)
                 painter.setPen(pen)
 
-                # **** NEW: Set Brush based on type ****
-                current_brush = QBrush(Qt.BrushStyle.NoBrush) # Default: no fill for text_input
+                # Set brush based on area type
+                current_brush = QBrush(Qt.BrushStyle.NoBrush) # Default for text_input
                 if area_type == "signature_area":
-                    # Forward diagonal lines (like /////)
                     current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.FDiagPattern)
                 elif area_type == "initials_area":
-                    # Backward diagonal lines (like \\\\\)
                     current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.BDiagPattern)
-
                 painter.setBrush(current_brush)
+                
                 painter.drawRect(rect_to_draw)
 
-        # Draw the current rubber band rectangle (as before)
+            # 2. If an item is selected, draw its resize handles
+            if self.selected_visual_info is not None and \
+               any(info['id'] == self.selected_visual_info['id'] for info in rect_infos_for_current_page): # Ensure selected is on current page
+                
+                selected_rect_for_handles = self.selected_visual_info['rect']
+                handle_rects = self._get_handle_rects(selected_rect_for_handles)
+                
+                painter.setPen(QPen(Qt.GlobalColor.black, 1)) # Pen for handles
+                painter.setBrush(QBrush(Qt.GlobalColor.white))    # Brush for handles
+                for handle_r in handle_rects.values():
+                    painter.drawRect(handle_r)
+            
+        # 3. Draw the active rubber band for new area definition (if any)
         if self.current_rubber_band_rect is not None and not self.current_rubber_band_rect.isNull():
             pen_rubber_band = QPen(Qt.GlobalColor.red, 1, Qt.PenStyle.DashLine)
             painter.setPen(pen_rubber_band)
-            painter.setBrush(Qt.BrushStyle.NoBrush) # Rubber band has no fill
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self.current_rubber_band_rect)
 
-
     def mouseMoveEvent(self, event):
-        # Handle rubber band drawing for defining new areas
-        if self.origin_point is not None and self.current_rubber_band_rect is not None and \
-           self.parent_widget and self.parent_widget.current_drawing_tool in ["text_area", "signature_area", "initials_area"]:
-            current_pos = event.pos()
+        current_pos = event.pos()
+        active_tool = self.parent_widget.current_drawing_tool if self.parent_widget else None
+
+        if self.is_resizing_selection and self.selected_visual_info and self.active_resize_handle is not None:
+            # **** RESIZING LOGIC ****
+            # Operate on a copy of the rectangle's state at the start of the resize
+            new_rect = QRect(self.resize_start_rect) 
+
+            # Adjust the new_rect based on which handle is being dragged
+            if self.active_resize_handle == H_TOP_LEFT:
+                new_rect.setTopLeft(current_pos)
+            elif self.active_resize_handle == H_TOP_MIDDLE:
+                new_rect.setTop(current_pos.y())
+            elif self.active_resize_handle == H_TOP_RIGHT:
+                new_rect.setTopRight(current_pos)
+            elif self.active_resize_handle == H_MIDDLE_LEFT:
+                new_rect.setLeft(current_pos.x())
+            elif self.active_resize_handle == H_MIDDLE_RIGHT:
+                new_rect.setRight(current_pos.x())
+            elif self.active_resize_handle == H_BOTTOM_LEFT:
+                new_rect.setBottomLeft(current_pos)
+            elif self.active_resize_handle == H_BOTTOM_MIDDLE:
+                new_rect.setBottom(current_pos.y())
+            elif self.active_resize_handle == H_BOTTOM_RIGHT:
+                new_rect.setBottomRight(current_pos)
+            
+            # Update the actual rectangle being displayed and stored in page_visual_rects
+            # Ensure normalized (positive width/height)
+            self.selected_visual_info['rect'] = new_rect.normalized() 
+            self.update()
+            return # Handled resize drag, exit
+
+        elif self.is_moving_selection and self.selected_visual_info: # Moving logic (as before)
+            mouse_delta = current_pos - self.drag_start_mouse_pos
+            new_top_left = self.drag_start_rect_pos + mouse_delta
+            self.selected_visual_info['rect'].moveTo(new_top_left)
+            self.update()
+            return 
+
+        elif self.origin_point is not None and self.current_rubber_band_rect is not None and \
+             active_tool in ["text_area", "signature_area", "initials_area"]: # Rubber band logic (as before)
             self.current_rubber_band_rect = QRect(self.origin_point, current_pos).normalized()
             self.update()
-        
-        # **** NEW: Handle moving an existing selected area ****
-        elif self.is_moving_selection and self.selected_visual_info:
-            mouse_delta = event.pos() - self.drag_start_mouse_pos
-            new_top_left = self.drag_start_rect_pos + mouse_delta
-            
-            # Update the 'rect' QRect object directly. Since it's a reference
-            # to the one in page_visual_rects, that list will also see the change.
-            self.selected_visual_info['rect'].moveTo(new_top_left)
-            self.update() # Trigger repaint to show the rectangle moving
+            return 
+
+        # Handle hover for resize/move cursors (no button pressed, as before)
+        # This logic for cursor changes on hover should be preserved from your last working version
+        if active_tool in ["select_area", "move_area"] and self.selected_visual_info and \
+           self.selected_visual_info['rect'] and self.current_pixmap_page_num is not None and \
+           any(info['id'] == self.selected_visual_info['id'] for info in self.page_visual_rects.get(self.current_pixmap_page_num,[])):
+
+            hovered_handle = self._get_handle_at_pos(current_pos, self.selected_visual_info['rect'])
+            if hovered_handle is not None:
+                # ... (set appropriate resize cursors based on hovered_handle, as you had before)
+                if hovered_handle in [H_TOP_LEFT, H_BOTTOM_RIGHT]: self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                elif hovered_handle in [H_TOP_RIGHT, H_BOTTOM_LEFT]: self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                elif hovered_handle in [H_TOP_MIDDLE, H_BOTTOM_MIDDLE]: self.setCursor(Qt.CursorShape.SizeVerCursor)
+                elif hovered_handle in [H_MIDDLE_LEFT, H_MIDDLE_RIGHT]: self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else: # Not hovering a handle
+                if active_tool == "move_area":
+                    if self.selected_visual_info['rect'].contains(current_pos):
+                        self.setCursor(Qt.CursorShape.OpenHandCursor)
+                    else: # Not on selected item with move tool
+                        self.setCursor(Qt.CursorShape.ArrowCursor) # Or specific move tool default
+                else: # Select tool, not on handle
+                     self.setCursor(Qt.CursorShape.ArrowCursor)
+        elif active_tool not in ["text_area", "signature_area", "initials_area", "move_area"] or not self.selected_visual_info :
+             # Fallback cursor if not a drawing tool and no selection or not move tool
+             # Ensure current tool determines cursor if nothing interactive is happening
+             if active_tool == "select_area": self.setCursor(Qt.CursorShape.ArrowCursor)
+             elif active_tool == "move_area": self.setCursor(Qt.CursorShape.OpenHandCursor) # Default for move tool
+             elif active_tool is None: self.setCursor(Qt.CursorShape.ArrowCursor)
+             # Drawing tools set their own cursor (CrossCursor) via DesignerApp.handleToolSelected
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            # Finalize defining a new area (rubber band)
-            if self.origin_point is not None and self.current_rubber_band_rect is not None and \
-               self.current_pixmap_page_num is not None and self.parent_widget and \
-               self.parent_widget.current_drawing_tool in ["text_area", "signature_area", "initials_area"]:
-                
-                final_rect_view = self.current_rubber_band_rect.normalized()
-                if final_rect_view.width() > 0 and final_rect_view.height() > 0:
-                    self.rectDefinedSignal.emit(final_rect_view)
-                
-                self.origin_point = None
-                self.current_rubber_band_rect = None
-                self.update()
+            active_tool = self.parent_widget.current_drawing_tool if self.parent_widget else None
 
-            # **** NEW: Finalize moving a selection ****
+            # **** NEW: Finalize resizing operation ****
+            if self.is_resizing_selection and self.selected_visual_info:
+                instance_id = self.selected_visual_info['id']
+                # Ensure the rect is normalized one last time before emitting
+                final_resized_view_qrect = self.selected_visual_info['rect'].normalized()
+                self.selected_visual_info['rect'] = final_resized_view_qrect # Update with normalized
+                print(f"Resize ended for ID: {instance_id}. New view QRect: {final_resized_view_qrect}")
+                self.areaResizedSignal.emit(instance_id, final_resized_view_qrect)
+                
+                self.is_resizing_selection = False
+                self.active_resize_handle = None
+                self.resize_start_mouse_pos = None
+                self.resize_start_rect = None
+                
+                # Reset cursor based on the active tool
+                if active_tool == "move_area":
+                    self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
+                elif active_tool == "select_area":
+                     self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.ArrowCursor)
+                # No specific update() needed here, as paintEvent will handle drawing final state
+
+            # Finalize moving a selection (as before)
             elif self.is_moving_selection and self.selected_visual_info:
                 instance_id = self.selected_visual_info['id']
-                new_view_qrect = self.selected_visual_info['rect'] # This is the updated rect
-
-                print(f"Move ended for ID: {instance_id}. New view QRect: {new_view_qrect}")
-                self.areaMovedSignal.emit(instance_id, new_view_qrect) # Emit signal to DesignerApp
-                
+                new_view_qrect = self.selected_visual_info['rect']
+                self.areaMovedSignal.emit(instance_id, new_view_qrect)
                 self.is_moving_selection = False
                 self.drag_start_mouse_pos = None
                 self.drag_start_rect_pos = None
-                # Cursor will be reset by DesignerApp when tool mode is confirmed or changed
-                # Or set it back to OpenHand for the move tool here:
-                if self.parent_widget and self.parent_widget.current_drawing_tool == "move_area":
+                if active_tool == "move_area": # Reset to open hand after move
                     self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
-                self.update() # Ensure final position is painted
+                # No specific update() needed here either
+
+            # Finalize defining a new area (rubber band) (as before)
+            elif self.origin_point is not None and self.current_rubber_band_rect is not None and \
+                 self.current_pixmap_page_num is not None and \
+                 active_tool in ["text_area", "signature_area", "initials_area"]:
+                final_rect_view = self.current_rubber_band_rect.normalized()
+                if final_rect_view.width() > 0 and final_rect_view.height() > 0:
+                    self.rectDefinedSignal.emit(final_rect_view)
+                self.origin_point = None
+                self.current_rubber_band_rect = None
+                self.update() # Update to clear rubber band
             
-            # If it was a click for selection and not a move, state is already handled by mousePress
-            # No explicit else needed here if mousePress handled selection updates.
+            # If it was just a click for selection, mousePressEvent already handled it.
 
     def clearDefinedRects(self):
         self.page_visual_rects = {}
@@ -483,8 +635,9 @@ class DesignerApp(QMainWindow):
         self.pdf_display_label.setStyleSheet("QLabel { background-color : lightgray; border: 1px solid black; }")
         
         self.pdf_display_label.rectDefinedSignal.connect(self.handleRectDefined)
-        # **** NEW: Connect the new signal ****
         self.pdf_display_label.areaSelectionChangedSignal.connect(self.handleAreaSelectionChanged)
+        self.pdf_display_label.areaMovedSignal.connect(self.handleAreaMoved)
+        self.pdf_display_label.areaResizedSignal.connect(self.handleAreaResized)
         
         self.scroll_area = QScrollArea(self)
         # ... (scroll_area setup as before) ...
@@ -1191,6 +1344,75 @@ class DesignerApp(QMainWindow):
                                     "Data Field Name / Link ID cannot be empty. Properties not updated.")
         else:
             print(f"Editing properties for area {selected_id} cancelled.")
+
+    def handleAreaMoved(self, instance_id, new_view_qrect):
+        """Handles the data update after a visual area has been moved."""
+        if not self.pdf_document: # Should not happen if an area was moved
+            return
+
+        area_updated = False
+        for i, area_info in enumerate(self.defined_pdf_areas):
+            if area_info['instance_id'] == instance_id:
+                # Transform the new view_qrect back to PDF page coordinates
+                inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+                
+                view_fitz_rect = fitz.Rect(new_view_qrect.x(), new_view_qrect.y(),
+                                           new_view_qrect.right(), new_view_qrect.bottom())
+                pdf_fitz_rect = view_fitz_rect * inverse_matrix
+
+                # Update the stored data
+                self.defined_pdf_areas[i]['rect_pdf'] = tuple(pdf_fitz_rect.irect)
+                self.defined_pdf_areas[i]['view_qrect_tuple'] = (new_view_qrect.x(), new_view_qrect.y(),
+                                                                 new_view_qrect.width(), new_view_qrect.height())
+                area_updated = True
+                
+                print(f"DesignerApp: Area {instance_id} data updated after move.")
+                print(f"  New View Coords Tuple: {self.defined_pdf_areas[i]['view_qrect_tuple']}")
+                print(f"  New PDF Coords: {self.defined_pdf_areas[i]['rect_pdf']}")
+                self.statusBar().showMessage(f"Area {instance_id} moved.", 3000)
+                # TODO: Mark project as dirty (needs saving)
+                break
+        
+        if not area_updated:
+            print(f"Warning: Could not find area with ID {instance_id} in self.defined_pdf_areas to update after move.")
+
+    def handleAreaResized(self, instance_id, new_view_qrect):
+        """Handles the data update after a visual area has been resized."""
+        if not self.pdf_document: # Should not happen if an area was resized
+            return
+
+        area_updated = False
+        for i, area_info in enumerate(self.defined_pdf_areas):
+            if area_info['instance_id'] == instance_id:
+                # Transform the new view_qrect back to PDF page coordinates
+                inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+                
+                # Ensure QRect has positive width/height before converting to fitz.Rect
+                # (though it should be normalized from InteractivePdfLabel)
+                normalized_view_qrect = new_view_qrect.normalized()
+
+                view_fitz_rect = fitz.Rect(normalized_view_qrect.x(), normalized_view_qrect.y(),
+                                           normalized_view_qrect.right(), normalized_view_qrect.bottom())
+                pdf_fitz_rect = view_fitz_rect * inverse_matrix
+
+                # Update the stored data
+                self.defined_pdf_areas[i]['rect_pdf'] = tuple(pdf_fitz_rect.irect)
+                self.defined_pdf_areas[i]['view_qrect_tuple'] = (normalized_view_qrect.x(), 
+                                                                 normalized_view_qrect.y(),
+                                                                 normalized_view_qrect.width(), 
+                                                                 normalized_view_qrect.height())
+                area_updated = True
+                
+                print(f"DesignerApp: Area {instance_id} data updated after resize.")
+                print(f"  New View Coords Tuple: {self.defined_pdf_areas[i]['view_qrect_tuple']}")
+                print(f"  New PDF Coords: {self.defined_pdf_areas[i]['rect_pdf']}")
+                self.statusBar().showMessage(f"Area {instance_id} resized.", 3000)
+                # TODO: Mark project as dirty (needs saving)
+                # TODO: If colors/styles are dependent on data that changed, update visual
+                break
+        
+        if not area_updated:
+            print(f"Warning: Could not find area with ID {instance_id} in self.defined_pdf_areas to update after resize.")
 
 # Main function remains the same
 def main():
