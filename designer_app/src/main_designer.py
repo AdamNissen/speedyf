@@ -65,6 +65,339 @@ class AreaPropertiesDialog(QDialog):
             }
         return None # Or raise an exception, or return an empty dict
 
+# ... (Near other class definitions, or at the top after imports)
+
+class Command: # A conceptual base class, or just an informal interface for now
+    def __init__(self, app_context, description="Generic Command"):
+        self.app = app_context # Reference to DesignerApp
+        self.description = description # For potential logging or UI display
+
+    def execute(self):
+        raise NotImplementedError("Subclasses should implement this!")
+
+    def undo(self):
+        raise NotImplementedError("Subclasses should implement this!")
+
+    def __str__(self): # For debugging
+        return self.description
+
+
+class DeleteAreaCommand(Command):
+    def __init__(self, app_context, instance_id_to_delete):
+        super().__init__(app_context, f"Delete Area: {instance_id_to_delete}")
+        self.instance_id = instance_id_to_delete
+        self.deleted_area_info = None # To store the full dict of the deleted area
+        self.original_index = -1      # To store its original index in the list for proper undo
+
+    def execute(self):
+        # Find the area and store its data and index before deleting
+        found = False
+        for i, area_info in enumerate(self.app.defined_pdf_areas):
+            if area_info['instance_id'] == self.instance_id:
+                self.deleted_area_info = area_info.copy() # Store a copy
+                self.original_index = i
+                
+                # 1. Remove from data model
+                del self.app.defined_pdf_areas[i]
+                print(f"Command: Data for area {self.instance_id} removed from defined_pdf_areas.")
+                found = True
+                break
+        
+        if not found:
+            print(f"Command Error: Could not find data for area ID {self.instance_id} to delete.")
+            # This command instance is now invalid, perhaps raise an error or handle
+            # For now, it just means execute did nothing to the main data.
+            # The undo stack should probably not get this command if execute effectively fails.
+            # We'll refine executeCommand later if needed.
+            return False # Indicate failure
+
+        # 2. Remove visual representation
+        page_num_of_deleted_area = self.deleted_area_info['page_num']
+        removed_visual = self.app.pdf_display_label.removeVisualRectById(page_num_of_deleted_area, self.instance_id)
+        if removed_visual:
+            print(f"Command: Visual for area {self.instance_id} on page {page_num_of_deleted_area + 1} removed.")
+        else:
+            print(f"Command Warning: Visual for area {self.instance_id} on page {page_num_of_deleted_area + 1} not found for removal.")
+
+        # 3. Clear selection if the deleted item was selected
+        if self.app.currently_selected_area_instance_id == self.instance_id:
+            self.app.handleAreaSelectionChanged(None) 
+            # This also updates UI like disabling delete/edit buttons
+
+        self.app.statusBar().showMessage(f"Area {self.instance_id} deleted.", 3000)
+        return True # Indicate success
+
+    def undo(self):
+        if self.deleted_area_info is None or self.original_index == -1:
+            print(f"Command Error: No data to undo deletion for area ID {self.instance_id}.")
+            return False # Indicate failure
+
+        # 1. Re-insert into data model at original position
+        self.app.defined_pdf_areas.insert(self.original_index, self.deleted_area_info)
+        print(f"Command: Data for area {self.instance_id} restored to defined_pdf_areas.")
+
+        # 2. Re-add visual representation
+        page_num = self.deleted_area_info['page_num']
+        # view_qrect_tuple needs to be converted back to QRect
+        vqt = self.deleted_area_info['view_qrect_tuple']
+        view_qrect = QRect(vqt[0], vqt[1], vqt[2], vqt[3])
+        area_type = self.deleted_area_info['type']
+        
+        self.app.pdf_display_label.addVisualRect(page_num, view_qrect, self.instance_id, area_type)
+        print(f"Command: Visual for area {self.instance_id} on page {page_num + 1} restored.")
+
+        # 3. Optionally, re-select the restored item (or clear selection)
+        # For simplicity, let's clear selection after undoing a delete
+        # Or, if DesignerApp's handleAreaSelectionChanged is robust, this might not be needed
+        # if self.app.currently_selected_area_instance_id is not None:
+        #     self.app.handleAreaSelectionChanged(None) 
+        # Let's assume selection remains cleared after an undo of delete for now.
+        # The user can re-select if needed.
+
+        self.app.statusBar().showMessage(f"Deletion of area {self.instance_id} undone.", 3000)
+        return True # Indicate success
+
+class AddAreaCommand(Command):
+    def __init__(self, app_context, area_info_to_add):
+        # area_info_to_add is the complete dictionary for the new area
+        # It should include: instance_id, page_num, rect_pdf, view_qrect_tuple,
+        #                    data_field_id, type, prompt
+        super().__init__(app_context, f"Add Area: {area_info_to_add.get('data_field_id', 'Unknown')}")
+        self.area_info = area_info_to_add
+        # The instance_id must be part of area_info_to_add, generated before command creation
+
+    def execute(self):
+        # 1. Add to data model
+        self.app.defined_pdf_areas.append(self.area_info)
+        print(f"Command: Area {self.area_info['instance_id']} added to defined_pdf_areas.")
+
+        # 2. Add visual representation
+        page_num = self.area_info['page_num']
+        vqt = self.area_info['view_qrect_tuple']
+        view_qrect = QRect(vqt[0], vqt[1], vqt[2], vqt[3])
+        instance_id = self.area_info['instance_id']
+        # area_type = self.area_info['type'] # Already have this
+        outline_rgba = self.area_info.get('outline_color_rgba')
+        fill_rgba = self.area_info.get('fill_color_rgba')
+        outline_w = self.area_info.get('outline_width')
+        
+        self.app.pdf_display_label.addVisualRect(page_num, view_qrect, instance_id, area_type,
+                                                 outline_color_rgba=outline_rgba,
+                                                 fill_color_rgba=fill_rgba,
+                                                 outline_width=outline_w)
+        
+        self.app.pdf_display_label.addVisualRect(page_num, view_qrect, instance_id, area_type)
+        print(f"Command: Visual for area {instance_id} on page {page_num + 1} added.")
+
+        # 3. Optional: Select the newly added area
+        # self.app.pdf_display_label.selected_visual_info = {'rect': view_qrect, 'id': instance_id, 'type': area_type}
+        # self.app.handleAreaSelectionChanged(instance_id) # This would also update UI
+        # For now, let's not auto-select to keep it simple. User can click to select.
+
+        self.app.statusBar().showMessage(f"Area '{self.area_info['data_field_id']}' added.", 3000)
+        return True # Indicate success
+
+    def undo(self):
+        # 1. Remove from data model (find by instance_id)
+        removed_from_data = False
+        for i, area in enumerate(self.app.defined_pdf_areas):
+            if area['instance_id'] == self.area_info['instance_id']:
+                del self.app.defined_pdf_areas[i]
+                removed_from_data = True
+                print(f"Command Undo: Area {self.area_info['instance_id']} removed from defined_pdf_areas.")
+                break
+        
+        if not removed_from_data:
+            print(f"Command Undo Error: Could not find {self.area_info['instance_id']} in defined_pdf_areas.")
+            return False
+
+        # 2. Remove visual representation
+        page_num = self.area_info['page_num']
+        instance_id = self.area_info['instance_id']
+        self.app.pdf_display_label.removeVisualRectById(page_num, instance_id)
+        print(f"Command Undo: Visual for area {instance_id} on page {page_num + 1} removed.")
+
+        # 3. Clear selection if this undone area was selected
+        if self.app.currently_selected_area_instance_id == instance_id:
+            self.app.handleAreaSelectionChanged(None)
+
+        self.app.statusBar().showMessage(f"Addition of area '{self.area_info['data_field_id']}' undone.", 3000)
+        return True # Indicate success
+
+class EditAreaPropertiesCommand(Command):
+    def __init__(self, app_context, instance_id, old_properties, new_properties):
+        # old_properties and new_properties should be dicts like {'data_field_id': ..., 'prompt': ...}
+        super().__init__(app_context, f"Edit Properties: {instance_id}")
+        self.instance_id = instance_id
+        self.old_props = old_properties # e.g., {'data_field_id': 'old_name', 'prompt': 'old_prompt'}
+        self.new_props = new_properties # e.g., {'data_field_id': 'new_name', 'prompt': 'new_prompt'}
+        self.area_index = -1 # To store the index of the area in defined_pdf_areas
+
+    def _find_area_and_index(self):
+        """Helper to find the area and its index."""
+        for i, area_info in enumerate(self.app.defined_pdf_areas):
+            if area_info['instance_id'] == self.instance_id:
+                self.area_index = i
+                return area_info
+        return None
+
+    def execute(self):
+        area_info = self._find_area_and_index()
+        if area_info is None:
+            print(f"Command Error: Area {self.instance_id} not found for editing properties.")
+            return False
+
+        # Store old properties if not already (e.g., if execute is called for redo)
+        # However, old_props should be captured before the first execute.
+        # For simplicity, we assume __init__ received correct old_props.
+
+        # Apply new properties
+        area_info['data_field_id'] = self.new_props['data_field_id']
+        area_info['prompt'] = self.new_props['prompt']
+        # Note: 'type', 'page_num', 'rect_pdf', 'view_qrect_tuple' are not changed by this command.
+        
+        print(f"Command: Properties for area {self.instance_id} updated to DataFieldID='{self.new_props['data_field_id']}', Prompt='{self.new_props['prompt']}'.")
+        self.app.statusBar().showMessage(f"Properties for area {self.instance_id} updated.", 3000)
+        
+        # If visual representation depends on these properties (e.g., a label showing data_field_id on the rect),
+        # we might need to trigger a repaint or update of that specific visual item.
+        # For now, our blue boxes don't change based on this metadata.
+        # self.app.pdf_display_label.update() # May not be needed if no visual change
+        
+        return True # Indicate success
+
+    def undo(self):
+        area_info = self._find_area_and_index() # Index should still be valid
+        if area_info is None:
+            # This would be a more serious issue, implies data inconsistency
+            print(f"Command Undo Error: Area {self.instance_id} not found for undoing property edit.")
+            return False
+
+        # Revert to old properties
+        area_info['data_field_id'] = self.old_props['data_field_id']
+        area_info['prompt'] = self.old_props['prompt']
+
+        print(f"Command Undo: Properties for area {self.instance_id} reverted to DataFieldID='{self.old_props['data_field_id']}', Prompt='{self.old_props['prompt']}'.")
+        self.app.statusBar().showMessage(f"Edit of area {self.instance_id} properties undone.", 3000)
+
+        # If visual representation depends on these properties, trigger update
+        # self.app.pdf_display_label.update()
+
+        return True # Indicate success
+
+class MoveAreaCommand(Command):
+    def __init__(self, app_context, instance_id, page_num, 
+                 old_view_rect_tuple, new_view_rect_tuple, 
+                 old_pdf_rect_tuple, new_pdf_rect_tuple):
+        super().__init__(app_context, f"Move Area: {instance_id}")
+        self.instance_id = instance_id
+        self.page_num = page_num # Page number of the moved area
+
+        # Store both view and PDF coordinates for old and new states
+        self.old_view_rect_tuple = old_view_rect_tuple
+        self.new_view_rect_tuple = new_view_rect_tuple
+        self.old_pdf_rect_tuple = old_pdf_rect_tuple
+        self.new_pdf_rect_tuple = new_pdf_rect_tuple
+        
+        self.area_index = -1 # To find the area quickly if needed
+
+    def _apply_state(self, pdf_rect_tuple, view_rect_tuple):
+        """Helper to apply a given state (PDF and view rects) to the area."""
+        found = False
+        for i, area_info in enumerate(self.app.defined_pdf_areas):
+            if area_info['instance_id'] == self.instance_id:
+                self.area_index = i # Store index for potential future use
+                area_info['rect_pdf'] = pdf_rect_tuple
+                area_info['view_qrect_tuple'] = view_rect_tuple
+                
+                # Update visual representation in InteractivePdfLabel
+                # Convert view_qrect_tuple back to QRect for the label
+                vqt = view_rect_tuple
+                view_qrect = QRect(vqt[0], vqt[1], vqt[2], vqt[3])
+                self.app.pdf_display_label.updateVisualRectPositionAndStyle(
+                    self.page_num, 
+                    self.instance_id, 
+                    new_rect=view_qrect
+                )
+                found = True
+                break
+        return found
+
+    def execute(self):
+        if not self._apply_state(self.new_pdf_rect_tuple, self.new_view_rect_tuple):
+            print(f"Command Error: Area {self.instance_id} not found for move execute.")
+            return False
+        
+        print(f"Command: Area {self.instance_id} moved to PDF Rect: {self.new_pdf_rect_tuple}.")
+        self.app.statusBar().showMessage(f"Area {self.instance_id} moved.", 3000)
+        return True
+
+    def undo(self):
+        if not self._apply_state(self.old_pdf_rect_tuple, self.old_view_rect_tuple):
+            print(f"Command Error: Area {self.instance_id} not found for move undo.")
+            return False
+
+        print(f"Command Undo: Area {self.instance_id} move reverted to PDF Rect: {self.old_pdf_rect_tuple}.")
+        self.app.statusBar().showMessage(f"Move of area {self.instance_id} undone.", 3000)
+        return True
+
+class ResizeAreaCommand(Command):
+    def __init__(self, app_context, instance_id, page_num, 
+                 old_view_rect_tuple, new_view_rect_tuple, 
+                 old_pdf_rect_tuple, new_pdf_rect_tuple):
+        super().__init__(app_context, f"Resize Area: {instance_id}")
+        self.instance_id = instance_id
+        self.page_num = page_num
+
+        # Store both view and PDF coordinates for old and new states
+        self.old_view_rect_tuple = old_view_rect_tuple
+        self.new_view_rect_tuple = new_view_rect_tuple
+        self.old_pdf_rect_tuple = old_pdf_rect_tuple
+        self.new_pdf_rect_tuple = new_pdf_rect_tuple
+        
+        self.area_index = -1 # To find the area quickly if needed (optional)
+
+    def _apply_state(self, pdf_rect_tuple, view_rect_tuple):
+        """Helper to apply a given state (PDF and view rects) to the area."""
+        found = False
+        for i, area_info in enumerate(self.app.defined_pdf_areas):
+            if area_info['instance_id'] == self.instance_id:
+                self.area_index = i 
+                area_info['rect_pdf'] = pdf_rect_tuple
+                area_info['view_qrect_tuple'] = view_rect_tuple
+                
+                # Update visual representation in InteractivePdfLabel
+                vqt = view_rect_tuple
+                view_qrect = QRect(vqt[0], vqt[1], vqt[2], vqt[3])
+                # We re-use the same method as for moving, as it updates the rect
+                self.app.pdf_display_label.updateVisualRectPositionAndStyle(
+                    self.page_num, 
+                    self.instance_id, 
+                    new_rect=view_qrect 
+                    # No need to pass new_type, as type doesn't change on resize
+                )
+                found = True
+                break
+        return found
+
+    def execute(self):
+        if not self._apply_state(self.new_pdf_rect_tuple, self.new_view_rect_tuple):
+            print(f"Command Error: Area {self.instance_id} not found for resize execute.")
+            return False
+        
+        print(f"Command: Area {self.instance_id} resized to PDF Rect: {self.new_pdf_rect_tuple}.")
+        self.app.statusBar().showMessage(f"Area {self.instance_id} resized.", 3000)
+        return True
+
+    def undo(self):
+        if not self._apply_state(self.old_pdf_rect_tuple, self.old_view_rect_tuple):
+            print(f"Command Error: Area {self.instance_id} not found for resize undo.")
+            return False
+
+        print(f"Command Undo: Area {self.instance_id} resize reverted to PDF Rect: {self.old_pdf_rect_tuple}.")
+        self.app.statusBar().showMessage(f"Resize of area {self.instance_id} undone.", 3000)
+        return True
+
 # For handle identification
 HANDLE_SIZE = 8
 H_TOP_LEFT, H_TOP_MIDDLE, H_TOP_RIGHT, \
@@ -88,7 +421,7 @@ class InteractivePdfLabel(QLabel):
         self.page_visual_rects = {} 
         self.current_pixmap_page_num = None
         self.selected_visual_info = None # Stores {'rect': QRect, 'id': str, 'type': str}
-
+        self.page_visual_rects = {} 
         self.is_moving_selection = False
         self.drag_start_mouse_pos = None     
         self.drag_start_rect_pos = None   
@@ -135,11 +468,21 @@ class InteractivePdfLabel(QLabel):
         self.current_pixmap_page_num = page_num
         self.update() # Trigger a repaint to show rects for the new page
 
-    def addVisualRect(self, page_num, view_qrect, instance_id, area_type):
+    def addVisualRect(self, page_num, view_qrect, instance_id, area_type, 
+                      outline_color_rgba=None, fill_color_rgba=None, outline_width=None): # Added properties
         if page_num not in self.page_visual_rects:
             self.page_visual_rects[page_num] = []
-        self.page_visual_rects[page_num].append({'rect': view_qrect, 'id': instance_id, 'type': area_type})
-
+        
+        item_info = {
+            'rect': view_qrect, 
+            'id': instance_id, 
+            'type': area_type,
+            'outline_color_rgba': outline_color_rgba if outline_color_rgba else (255,0,0,255), # Default red
+            'fill_color_rgba': fill_color_rgba if fill_color_rgba else (0,0,0,0),       # Default transparent
+            'outline_width': outline_width if outline_width is not None else 1             # Default 1px
+        }
+        self.page_visual_rects[page_num].append(item_info)
+        
         if page_num == self.current_pixmap_page_num:
             self.update()
 
@@ -155,11 +498,18 @@ class InteractivePdfLabel(QLabel):
             active_tool = self.parent_widget.current_drawing_tool
             click_pos = event.pos()
 
-            drawing_tools = ["text_area", "signature_area", "initials_area"]
-            if active_tool in drawing_tools:
+            area_definition_tools = ["text_area", "signature_area", "initials_area"]
+            shape_drawing_tools = ["draw_rectangle", "draw_oval", "draw_line"] # NEW
+            
+            # Combine them for initiating a mouse drag for drawing
+            all_drawing_initiation_tools = area_definition_tools + shape_drawing_tools # NEW
+
+            if active_tool in all_drawing_initiation_tools: # **** MODIFIED CONDITION ****
                 self.origin_point = click_pos
                 self.current_rubber_band_rect = QRect(self.origin_point, self.origin_point)
-                if self.selected_visual_info is not None:
+                
+                if self.selected_visual_info is not None: # Deselect if starting a new draw
+                    # ... (deselect logic as before) ...
                     self.selected_visual_info = None
                     self.areaSelectionChangedSignal.emit(None)
                 self.update()
@@ -290,55 +640,80 @@ class InteractivePdfLabel(QLabel):
                     self.update() # Ensure deselection is painted
 
     def paintEvent(self, event):
-        super().paintEvent(event) # Draw the pixmap
+        super().paintEvent(event)
         painter = QPainter(self)
 
         if self.current_pixmap_page_num is not None:
             rect_infos_for_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
-
-            # 1. Draw all defined visual rectangles with their type-specific styles
+            
             for info in rect_infos_for_current_page:
                 rect_to_draw = info['rect']
                 area_type = info.get('type', 'text_input')
                 
-                # Determine if this rectangle is the currently selected one
-                is_selected = (self.selected_visual_info is not None and 
-                               self.selected_visual_info['id'] == info['id'])
+                # A more consolidated way to set pen/brush:
+                if is_selected:
+                    pen_color = Qt.GlobalColor.green
+                    pen_width = 2
+                    # Selected items generally don't show their type-specific fill, just border
+                    current_brush = QBrush(Qt.BrushStyle.NoBrush) 
+                else: # Not selected - apply type-specific styles
+                    pen_width = 1 # Default for non-selected
+                    if area_type == "signature_area":
+                        pen_color = Qt.GlobalColor.blue
+                        current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.FDiagPattern)
+                    elif area_type == "initials_area":
+                        pen_color = Qt.GlobalColor.blue
+                        current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.BDiagPattern)
+                    elif area_type == "text_input":
+                        pen_color = Qt.GlobalColor.blue
+                        current_brush = QBrush(Qt.BrushStyle.NoBrush)
+                    elif area_type == "drawing_rectangle":
+                        pen_color = Qt.GlobalColor.red # User specified red
+                        current_brush = QBrush(Qt.BrushStyle.NoBrush) # No fill
+                    # Add drawing_oval, drawing_line here later
+                    else: # Default for unknown types if any
+                        pen_color = Qt.GlobalColor.black 
+                        current_brush = QBrush(Qt.BrushStyle.NoBrush)
 
-                # Set pen based on selection state
-                pen_color = Qt.GlobalColor.green if is_selected else Qt.GlobalColor.blue
-                pen_width = 2 if is_selected else 1
                 pen = QPen(pen_color, pen_width, Qt.PenStyle.SolidLine)
                 painter.setPen(pen)
-
-                # Set brush based on area type
-                current_brush = QBrush(Qt.BrushStyle.NoBrush) # Default for text_input
-                if area_type == "signature_area":
-                    current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.FDiagPattern)
-                elif area_type == "initials_area":
-                    current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.BDiagPattern)
                 painter.setBrush(current_brush)
                 
-                painter.drawRect(rect_to_draw)
+                # Actual drawing based on type (for now, all are rects from info['rect'])
+                if area_type in ["text_input", "signature_area", "initials_area", "drawing_rectangle"]:
+                    painter.drawRect(rect_to_draw)
+                # elif area_type == "drawing_oval": painter.drawEllipse(rect_to_draw)
+                # elif area_type == "drawing_line": painter.drawLine(rect_to_draw.topLeft(), rect_to_draw.bottomRight())
 
-            # 2. If an item is selected, draw its resize handles
-            if self.selected_visual_info is not None and \
-               any(info['id'] == self.selected_visual_info['id'] for info in rect_infos_for_current_page): # Ensure selected is on current page
+                pen = QPen(pen_color, pen_width, pen_style)
+                painter.setPen(pen)
+                painter.setBrush(current_brush)
                 
+                # Actual drawing based on type
+                if area_type in ["text_input", "signature_area", "initials_area", "drawing_rectangle"]:
+                    painter.drawRect(rect_to_draw)
+                # Add elif for drawing_oval and drawing_line here later
+                # elif area_type == "drawing_oval":
+                #     painter.drawEllipse(rect_to_draw)
+                # elif area_type == "drawing_line":
+                #     painter.drawLine(rect_to_draw.topLeft(), rect_to_draw.bottomRight())
+
+
+            # Draw resize handles if selected (as before)
+            if self.selected_visual_info and \
+               any(info['id'] == self.selected_visual_info['id'] for info in rect_infos_for_current_page):
                 selected_rect_for_handles = self.selected_visual_info['rect']
                 handle_rects = self._get_handle_rects(selected_rect_for_handles)
-                
-                painter.setPen(QPen(Qt.GlobalColor.black, 1)) # Pen for handles
-                painter.setBrush(QBrush(Qt.GlobalColor.white))    # Brush for handles
+                painter.setPen(QPen(Qt.GlobalColor.black, 1))
+                painter.setBrush(QBrush(Qt.GlobalColor.white))
                 for handle_r in handle_rects.values():
                     painter.drawRect(handle_r)
             
-        # 3. Draw the active rubber band for new area definition (if any)
-        if self.current_rubber_band_rect is not None and not self.current_rubber_band_rect.isNull():
-            pen_rubber_band = QPen(Qt.GlobalColor.red, 1, Qt.PenStyle.DashLine)
-            painter.setPen(pen_rubber_band)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(self.current_rubber_band_rect)
+            # Draw rubber band (as before)
+            if self.current_rubber_band_rect is not None and not self.current_rubber_band_rect.isNull():
+                # ...
+                painter.drawRect(self.current_rubber_band_rect)
+
 
     def mouseMoveEvent(self, event):
         current_pos = event.pos()
@@ -481,6 +856,36 @@ class InteractivePdfLabel(QLabel):
             return True
         return False
     
+    def updateVisualRectPositionAndStyle(self, page_num, instance_id, new_rect=None, new_type=None):
+        """
+        Updates the properties (rect, type) of a specific visual rectangle
+        and triggers a repaint if it's on the current page.
+        If new_rect is None, only type might be updated (if new_type provided).
+        If new_type is None, only rect might be updated (if new_rect provided).
+        """
+        if page_num in self.page_visual_rects:
+            for i, info in enumerate(self.page_visual_rects[page_num]):
+                if info['id'] == instance_id:
+                    changed = False
+                    if new_rect is not None and info['rect'] != new_rect:
+                        self.page_visual_rects[page_num][i]['rect'] = new_rect
+                        changed = True
+                    if new_type is not None and info.get('type') != new_type:
+                         self.page_visual_rects[page_num][i]['type'] = new_type
+                         changed = True
+                    
+                    if changed and page_num == self.current_pixmap_page_num:
+                        # If this was the selected item, update its rect in selected_visual_info too
+                        if self.selected_visual_info and self.selected_visual_info['id'] == instance_id:
+                            if new_rect is not None:
+                                self.selected_visual_info['rect'] = new_rect
+                            if new_type is not None:
+                                self.selected_visual_info['type'] = new_type
+                        self.update()
+                    return True # Found and updated (or checked)
+        return False # Not found
+
+    
 class DesignerApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -488,10 +893,20 @@ class DesignerApp(QMainWindow):
         self.current_pdf_path = None # **** NEW: Path to the currently loaded PDF ****
         self.current_project_path = None # **** NEW: Path to the current project file ****
         self.current_page_num = 0
-        self.current_zoom_factor = 1.5
+        self.zoom_levels = [0.25, 0.50, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
+        # Find the index for our default zoom factor (e.g., 1.5)
+        try:
+            self.current_zoom_level_index = self.zoom_levels.index(1.5) 
+        except ValueError:
+            self.current_zoom_level_index = self.zoom_levels.index(1.0) # Fallback to 100%
+            print("Warning: Default zoom 1.5 not in zoom_levels, defaulting to 1.0")
+        self.current_zoom_factor = self.zoom_levels[self.current_zoom_level_index]
         self.defined_pdf_areas = []
         self.current_drawing_tool = None # Will be set in initUI or by tool selection
-        self.currently_selected_area_instance_id = None # **** NEW/REPURPOSED ****
+        self.currently_selected_area_instance_id = None
+        self.project_is_dirty = False 
+        self.undo_stack = []
+        self.redo_stack = []
         self.initUI()
         #self.setSelectToolActive() #commented out to remove the activation
 
@@ -534,6 +949,22 @@ class DesignerApp(QMainWindow):
         self.save_project_as_action.triggered.connect(self.saveProjectAs)
         self.save_project_as_action.setEnabled(False) 
         file_menu.addAction(self.save_project_as_action)
+
+        edit_menu = menubar.addMenu('&Edit')
+
+        self.undo_action = QAction('&Undo', self)
+        self.undo_action.setStatusTip('Undo the last action')
+        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo) # Ctrl+Z
+        self.undo_action.triggered.connect(self.undo)
+        self.undo_action.setEnabled(False) # Initially disabled
+        edit_menu.addAction(self.undo_action)
+
+        self.redo_action = QAction('&Redo', self)
+        self.redo_action.setStatusTip('Redo the last undone action')
+        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo) # Ctrl+Y or Ctrl+Shift+Z on some platforms
+        self.redo_action.triggered.connect(self.redo)
+        self.redo_action.setEnabled(False) # Initially disabled
+        edit_menu.addAction(self.redo_action)        
 
         # --- Toolbar ---
         toolbar = QToolBar("Main Toolbar")
@@ -585,15 +1016,57 @@ class DesignerApp(QMainWindow):
         toolbar.addAction(self.move_area_action)
         self.tool_action_group.addAction(self.move_area_action)
 
-        toolbar.addSeparator()
+        # **** NEW: Drawing Tools ****
+        toolbar.addSeparator() # Separate drawing tools
 
-        # Delete Area Action (as before)
-        self.delete_area_action = QAction("Delete Area", self)
-        # ... (rest of delete_area_action setup)
-        self.delete_area_action.setStatusTip("Delete the currently selected area")
-        self.delete_area_action.triggered.connect(self.deleteSelectedArea)
-        self.delete_area_action.setEnabled(False) 
-        toolbar.addAction(self.delete_area_action)
+        self.draw_rectangle_action = QAction("Draw Rectangle", self)
+        # self.draw_rectangle_action.setIcon(QIcon("path/to/rect_icon.png")) # Optional
+        self.draw_rectangle_action.setStatusTip("Draw a rectangle shape")
+        self.draw_rectangle_action.setCheckable(True)
+        self.draw_rectangle_action.setData("draw_rectangle")
+        toolbar.addAction(self.draw_rectangle_action)
+        self.tool_action_group.addAction(self.draw_rectangle_action)
+
+        self.draw_oval_action = QAction("Draw Oval", self)
+        # self.draw_oval_action.setIcon(QIcon("path/to/oval_icon.png")) # Optional
+        self.draw_oval_action.setStatusTip("Draw an oval shape")
+        self.draw_oval_action.setCheckable(True)
+        self.draw_oval_action.setData("draw_oval")
+        toolbar.addAction(self.draw_oval_action)
+        self.tool_action_group.addAction(self.draw_oval_action)
+
+        self.draw_line_action = QAction("Draw Line", self)
+        # self.draw_line_action.setIcon(QIcon("path/to/line_icon.png")) # Optional
+        self.draw_line_action.setStatusTip("Draw a line segment")
+        self.draw_line_action.setCheckable(True)
+        self.draw_line_action.setData("draw_line")
+        toolbar.addAction(self.draw_line_action)
+        self.tool_action_group.addAction(self.draw_line_action)
+
+        toolbar.addSeparator() # Separator after drawing tools
+
+        # **** NEW: Zoom Actions ****
+        self.zoom_out_action = QAction("Zoom Out", self)
+        # self.zoom_out_action.setIcon(QIcon("path/to/zoom_out_icon.png")) # Optional
+        self.zoom_out_action.setStatusTip("Decrease zoom level")
+        self.zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut) # Typically Ctrl+-
+        self.zoom_out_action.triggered.connect(self.zoomOut)
+        self.zoom_out_action.setEnabled(False) # Initially disabled
+        toolbar.addAction(self.zoom_out_action)
+
+        self.zoom_in_action = QAction("Zoom In", self)
+        # self.zoom_in_action.setIcon(QIcon("path/to/zoom_in_icon.png")) # Optional
+        self.zoom_in_action.setStatusTip("Increase zoom level")
+        self.zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn) # Typically Ctrl++
+        self.zoom_in_action.triggered.connect(self.zoomIn)
+        self.zoom_in_action.setEnabled(False) # Initially disabled
+        toolbar.addAction(self.zoom_in_action)
+        
+        # We could add a QLabel here to display current zoom % later
+        # self.zoom_level_label = QLabel("100%")
+        # toolbar.addWidget(self.zoom_level_label)
+
+        toolbar.addSeparator()
 
         # Edit Area Properties Action (as before)
         self.edit_area_action = QAction("Edit Properties", self)
@@ -602,6 +1075,14 @@ class DesignerApp(QMainWindow):
         self.edit_area_action.triggered.connect(self.editSelectedAreaProperties)
         self.edit_area_action.setEnabled(False) 
         toolbar.addAction(self.edit_area_action)
+
+        # Delete Area Action (as before)
+        self.delete_area_action = QAction("Delete Area", self)
+        # ... (rest of delete_area_action setup)
+        self.delete_area_action.setStatusTip("Delete the currently selected area")
+        self.delete_area_action.triggered.connect(self.deleteSelectedArea)
+        self.delete_area_action.setEnabled(False) 
+        toolbar.addAction(self.delete_area_action)
 
         # --- Controls Widget (as before) ---
         controls_widget = QWidget()
@@ -628,12 +1109,13 @@ class DesignerApp(QMainWindow):
 
         # --- PDF Display Area ---
         self.pdf_display_label = InteractivePdfLabel(self) # self is DesignerApp
-        # ... (pdf_display_label setup as before) ...
         self.default_min_display_width = 400
         self.default_min_display_height = 300
         self.pdf_display_label.setMinimumSize(self.default_min_display_width, self.default_min_display_height)
         self.pdf_display_label.setStyleSheet("QLabel { background-color : lightgray; border: 1px solid black; }")
-        
+
+        self.pdf_display_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+         
         self.pdf_display_label.rectDefinedSignal.connect(self.handleRectDefined)
         self.pdf_display_label.areaSelectionChangedSignal.connect(self.handleAreaSelectionChanged)
         self.pdf_display_label.areaMovedSignal.connect(self.handleAreaMoved)
@@ -650,6 +1132,7 @@ class DesignerApp(QMainWindow):
         self.info_label.setText("Select a tool from the toolbar or load a PDF.")
         self.pdf_display_label.setCursor(Qt.CursorShape.ArrowCursor)
 
+        self._updateUndoRedoActionStates()
         # The status bar is already set to "Ready"
         # self.statusBar().showMessage("Ready")
 
@@ -760,7 +1243,10 @@ class DesignerApp(QMainWindow):
                 view_rect_infos.append({
                     'rect': view_qrect, 
                     'id': area_info['instance_id'],
-                    'type': area_info['type'] # Get type from stored data
+                    'type': area_info['type'],
+                    'outline_color_rgba': area_info.get('outline_color_rgba'), # Pass along
+                    'fill_color_rgba': area_info.get('fill_color_rgba'),       # Pass along
+                    'outline_width': area_info.get('outline_width')            # Pass along
                 })
         return view_rect_infos
 
@@ -794,7 +1280,12 @@ class DesignerApp(QMainWindow):
             self.pdf_display_label.clearDefinedRects() 
             view_rect_infos_for_this_page = self._get_view_rects_for_page(page_num)
             for info in view_rect_infos_for_this_page:
-                self.pdf_display_label.addVisualRect(page_num, info['rect'], info['id'], info['type'])
+                self.app.pdf_display_label.addVisualRect( # Changed from self.pdf_display_label
+                    page_num, info['rect'], info['id'], info['type'],
+                    outline_color_rgba=info.get('outline_color_rgba'),
+                    fill_color_rgba=info.get('fill_color_rgba'),
+                    outline_width=info.get('outline_width')
+                )
             # The label's own selected_visual_info will be None due to setCurrentPixmapPage or clearDefinedRects
             # or if it's re-selected, mousePressEvent will handle it.
 
@@ -814,80 +1305,100 @@ class DesignerApp(QMainWindow):
             # self.currently_selected_area_instance_id = None # Already handled by _reset
             self._updateNavigation()
 
-    def handleRectDefined(self, view_qrect):
+    def handleRectDefined(self, view_qrect): # view_qrect is the QRect from the signal
         if not self.pdf_document or self.pdf_display_label.current_pixmap_page_num is None:
             return 
         
         current_tool_page = self.pdf_display_label.current_pixmap_page_num
-        tool_type_for_dialog = ""
-        default_name_prefix = ""
-        area_data_type_string = ""
+        
+        # --- Logic for tools that use the AreaPropertiesDialog ---
+        if self.current_drawing_tool in ["text_area", "signature_area", "initials_area"]:
+            tool_type_for_dialog = ""
+            default_name_prefix = ""
+            area_data_type_string = ""
 
-        if self.current_drawing_tool == "text_area":
-            tool_type_for_dialog = "Text Input"
-            default_name_prefix = "TextArea"
-            area_data_type_string = "text_input"
-        elif self.current_drawing_tool == "signature_area":
-            tool_type_for_dialog = "Signature Area"
-            default_name_prefix = "SignatureArea"
-            area_data_type_string = "signature_area"
-        elif self.current_drawing_tool == "initials_area": # **** NEW elif block ****
-            tool_type_for_dialog = "Initials Area"
-            default_name_prefix = "InitialsArea"
-            area_data_type_string = "initials_area"
-        else:
-            print(f"Rectangle defined with no active drawing tool or unknown tool: {self.current_drawing_tool}")
-            return # Do not proceed
+            if self.current_drawing_tool == "text_area":
+                tool_type_for_dialog = "Text Input"
+                default_name_prefix = "TextArea"
+                area_data_type_string = "text_input"
+            elif self.current_drawing_tool == "signature_area":
+                tool_type_for_dialog = "Signature Area"
+                default_name_prefix = "SignatureArea"
+                area_data_type_string = "signature_area"
+            elif self.current_drawing_tool == "initials_area":
+                tool_type_for_dialog = "Initials Area"
+                default_name_prefix = "InitialsArea"
+                area_data_type_string = "initials_area"
+            
+            suggested_data_field_id = f"{default_name_prefix}_{len(self.defined_pdf_areas) + 1}"
+            current_prompt_text = ""
 
-        # Common logic for dialog and processing
-        suggested_data_field_id = f"{default_name_prefix}_{len(self.defined_pdf_areas) + 1}"
-        current_prompt_text = ""
+            while True: # Dialog loop
+                dialog = AreaPropertiesDialog(
+                    area_type=tool_type_for_dialog, 
+                    default_data_field_id=suggested_data_field_id,
+                    default_prompt=current_prompt_text,          
+                    parent=self
+                )
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    properties = dialog.getProperties()
+                    suggested_data_field_id = properties["data_field_id"] # Keep for next suggestion
+                    current_prompt_text = properties["prompt"]
 
-        while True:
-            dialog = AreaPropertiesDialog(
-                area_type=tool_type_for_dialog, 
-                default_data_field_id=suggested_data_field_id,
-                default_prompt=current_prompt_text,          
-                parent=self
-            )
-
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                properties = dialog.getProperties()
-                suggested_data_field_id = properties["data_field_id"] if properties else suggested_data_field_id
-                current_prompt_text = properties["prompt"] if properties else current_prompt_text
-
-                if properties and properties["data_field_id"]:
-                    inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
-                    view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
-                                               view_qrect.right(), view_qrect.bottom())
-                    pdf_fitz_rect = view_fitz_rect * inverse_matrix
-                    instance_id = f"inst_{uuid.uuid4().hex[:8]}"
-
-                    defined_area_info = {
-                        'instance_id': instance_id,
-                        'page_num': current_tool_page,
-                        'rect_pdf': tuple(pdf_fitz_rect.irect), 
-                        'data_field_id': properties["data_field_id"],
-                        'type': area_data_type_string, # This is "text_input", "signature_area", or "initials_area"
-                        'prompt': properties["prompt"],
-                        'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), 
-                                            view_qrect.width(), view_qrect.height())
-                    }
-                    self.defined_pdf_areas.append(defined_area_info)
-
-                    print(f"Area Defined ({area_data_type_string}) and Accepted (Instance ID: {instance_id}):")
-                    print(f"  Data Field ID: {properties['data_field_id']}, Prompt: {properties['prompt']}")
-                    print(f"  Total Defined Areas: {len(self.defined_pdf_areas)}")
-
-                    self.pdf_display_label.addVisualRect(current_tool_page, view_qrect, instance_id, area_data_type_string)
-                    break 
+                    if properties and properties["data_field_id"]:
+                        instance_id = f"inst_{uuid.uuid4().hex[:8]}"
+                        inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+                        view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
+                                                   view_qrect.right(), view_qrect.bottom())
+                        pdf_fitz_rect = view_fitz_rect * inverse_matrix
+                        
+                        area_info_to_add = {
+                            'instance_id': instance_id, 'page_num': current_tool_page,
+                            'rect_pdf': tuple(pdf_fitz_rect.irect), 
+                            'data_field_id': properties["data_field_id"], 'type': area_data_type_string, 
+                            'prompt': properties["prompt"],
+                            'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), 
+                                                 view_qrect.width(), view_qrect.height())
+                        }
+                        command = AddAreaCommand(self, area_info_to_add)
+                        self.executeCommand(command)
+                        break 
+                    else: 
+                        QMessageBox.warning(self, "Missing Information", "Data Field Name / Link ID cannot be empty. Please try again.")
                 else: 
-                    QMessageBox.warning(self, "Missing Information", 
-                                        "Data Field Name / Link ID cannot be empty. Please try again.")
-            else: 
-                print(f"Area definition ({area_data_type_string}) cancelled by user.")
-                break 
+                    print(f"Area definition ({area_data_type_string}) cancelled by user.")
+                    break 
+        
+        # --- **** NEW: Logic for "draw_rectangle" tool (bypasses dialog for MVP) **** ---
+        elif self.current_drawing_tool == "draw_rectangle":
+            instance_id = f"draw_rect_{uuid.uuid4().hex[:8]}"
+            inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+            view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
+                                       view_qrect.right(), view_qrect.bottom())
+            pdf_fitz_rect = view_fitz_rect * inverse_matrix
 
+            area_info_to_add = {
+                'instance_id': instance_id,
+                'page_num': current_tool_page,
+                'rect_pdf': tuple(pdf_fitz_rect.irect),
+                'type': "drawing_rectangle", # Key for paintEvent
+                'data_field_id': instance_id, # Needs a data_field_id
+                'prompt': '', # No prompt
+                'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), 
+                                     view_qrect.width(), view_qrect.height())
+                # No specific color/width properties stored in the data model for this MVP part A
+            }
+            command = AddAreaCommand(self, area_info_to_add)
+            self.executeCommand(command)
+            print(f"Drawing Rectangle Added (Instance ID: {instance_id})")
+            # No dialog for MVP drawing tool
+
+        # Add elif for "draw_oval" and "draw_line" here later
+
+        else:
+            print(f"Rectangle defined with unhandled active drawing tool: {self.current_drawing_tool}")
+            return
+        
     def openPdfFile(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open PDF File", "", 
                                                    "PDF Files (*.pdf);;All Files (*)")
@@ -920,6 +1431,7 @@ class DesignerApp(QMainWindow):
                                          f"The selected file '{file_name.split('/')[-1]}' is not a PDF document.")
                     self._reset_pdf_display_label("File is not a PDF. Please select a PDF file.")
                     self._updateNavigation()
+                    self._markProjectAsDirty(False)
                     # Ensure save actions remain disabled
                     if hasattr(self, 'save_project_as_action'): self.save_project_as_action.setEnabled(False)
                     if hasattr(self, 'save_project_action'): self.save_project_action.setEnabled(False)
@@ -928,16 +1440,19 @@ class DesignerApp(QMainWindow):
                 self.pdf_document = doc
                 self.current_pdf_path = file_name # Store new PDF path
                 self.current_page_num = 0 
-                self.current_zoom_factor = 1.5
+                try:
+                    self.current_zoom_level_index = self.zoom_levels.index(1.5) # Default to 150%
+                except ValueError:
+                    self.current_zoom_level_index = self.zoom_levels.index(1.0) # Fallback to 100%
+                self.current_zoom_factor = self.zoom_levels[self.current_zoom_level_index]
+
                 self.info_label.setText(f"Loaded: {file_name.split('/')[-1]} ({self.pdf_document.page_count} pages)")
-                self.displayPdfPage(self.current_page_num)
-                
-                # Enable "Save Project As..." now that a PDF is loaded
-                if hasattr(self, 'save_project_as_action'):
-                    self.save_project_as_action.setEnabled(True)
-                # "Save" remains disabled until a "Save As..." is done for this new context
-                if hasattr(self, 'save_project_action'):
-                     self.save_project_action.setEnabled(False)
+                self.displayPdfPage(self.current_page_num) # This will use the new zoom factor
+
+                self.save_project_as_action.setEnabled(True)
+                if hasattr(self, 'save_project_action'): self.save_project_action.setEnabled(False)
+                self._updateZoomActionStates()
+                self._markProjectAsDirty(False)
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to open or process file: {e}")
@@ -950,6 +1465,8 @@ class DesignerApp(QMainWindow):
                     self.save_project_as_action.setEnabled(False)
                 if hasattr(self, 'save_project_action'):
                      self.save_project_action.setEnabled(False)
+                self._updateZoomActionStates()
+                self._markProjectAsDirty(False)
         else:
             # User cancelled the file dialog. Current state remains unchanged.
             pass
@@ -974,12 +1491,17 @@ class DesignerApp(QMainWindow):
             project_data = {
                 'version': '1.0',
                 'pdf_path': self.current_pdf_path,
-                'defined_areas': self.defined_pdf_areas
+                'defined_areas': self.defined_pdf_areas,
+                'zoom_factor': self.current_zoom_factor
             }
             try:
                 with open(self.current_project_path, 'w') as f:
                     json.dump(project_data, f, indent=4)
                 self.statusBar().showMessage(f"Project saved to {self.current_project_path}", 5000)
+                self._markProjectAsDirty(False)
+                self.undo_stack.clear() # Clear history after save
+                self.redo_stack.clear()
+                self._updateUndoRedoActionStates()
                 # TODO (Advanced): Implement a "dirty" flag to track unsaved changes.
                 # For now, "Save" is always available if a project path exists.
             except Exception as e:
@@ -1016,8 +1538,11 @@ class DesignerApp(QMainWindow):
                 
                 self.current_project_path = file_path
                 self.statusBar().showMessage(f"Project saved to {file_path}", 5000)
-                # **** NEW: Enable "Save" action after "Save As..." ****
-                self.save_project_action.setEnabled(True) 
+                if hasattr(self, 'save_project_action'): self.save_project_action.setEnabled(True)
+                self._markProjectAsDirty(False)
+                self.undo_stack.clear() # Clear history after save as
+                self.redo_stack.clear()
+                self._updateUndoRedoActionStates()
                 # Update window title to include project name? (more advanced)
             except Exception as e:
                 QMessageBox.critical(self, "Save Error", f"Could not save project: {e}")
@@ -1048,108 +1573,155 @@ class DesignerApp(QMainWindow):
     # This encourages "Save As" for a newly opened/modified PDF configuration.
 
     def newProject(self):
-        # TODO (Advanced): Check for unsaved changes and prompt.
-        
+        # First, check for unsaved changes and prompt the user if necessary.
+        if not self._promptToSaveUnsavedChanges():
+            self.statusBar().showMessage("New project creation cancelled.", 2000)
+            return # User cancelled the "New Project" operation or a preceding save failed.
+
+        # Proceed with resetting for a new project if changes were saved, discarded, or there were none.
         if self.pdf_document:
             self.pdf_document.close()
             self.pdf_document = None
 
         self.current_pdf_path = None
-        self.current_project_path = None # **** ENSURE THIS IS CLEARED ****
+        self.current_project_path = None # Ensure this is cleared for a new, unsaved project
         self.defined_pdf_areas = []
         self.current_page_num = 0
         
-        self.pdf_display_label.clearDefinedRects()
-        self._reset_pdf_display_label("Load a PDF to begin a new project.")
-        self._updateNavigation()
+        # Reset zoom to default
+        try:
+            self.current_zoom_level_index = self.zoom_levels.index(1.5) 
+        except ValueError:
+            self.current_zoom_level_index = self.zoom_levels.index(1.0) # Fallback
+        self.current_zoom_factor = self.zoom_levels[self.current_zoom_level_index]
+
+        # Clear visual elements from the PDF display label
+        self.pdf_display_label.clearDefinedRects() 
+        self._reset_pdf_display_label("Load a PDF to begin a new project.") # Resets display and selection state
+        
+        # Update UI states
+        self._updateNavigation() 
+        self._updateZoomActionStates()
 
         self.info_label.setText("New project started. Load a PDF.")
         self.statusBar().showMessage("New project created. Ready.", 5000)
 
-        # Update enabled state of menu actions
-        if hasattr(self, 'save_project_as_action'):
-            self.save_project_as_action.setEnabled(False)
-        if hasattr(self, 'save_project_action'): # **** ENSURE SAVE IS DISABLED ****
+        # Disable save actions as it's a new, unsaved project context
+        if hasattr(self, 'save_project_as_action'): 
+            self.save_project_as_action.setEnabled(False) # Becomes enabled when a PDF is loaded
+        if hasattr(self, 'save_project_action'): 
             self.save_project_action.setEnabled(False)
+        
+        # Mark the new project as not dirty
+        self._markProjectAsDirty(False) 
+        # _updateWindowTitle is called by _markProjectAsDirty to reflect "Untitled"
+
+        # Clear undo/redo history for the new project
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._updateUndoRedoActionStates() # Disable Undo/Redo menu items
         
         print("New project started.")
 
     def openExistingProject(self):
-        # TODO (Advanced): Check for unsaved changes in the current project and prompt to save.
-        
+        # **** NEW: Prompt to save if current project is dirty ****
+        if not self._promptToSaveUnsavedChanges():
+            self.statusBar().showMessage("Open project cancelled.", 2000)
+            return # User cancelled or save failed/was cancelled
+
+        # Proceed with opening a project file
         file_path, _ = QFileDialog.getOpenFileName(self, "Open SpeedyF Project", "",
                                                    "SpeedyF Project Files (*.speedyf_proj);;All Files (*)")
 
         if not file_path:
-            self.statusBar().showMessage("Open project cancelled.", 2000)
+            self.statusBar().showMessage("Open project cancelled by user from file dialog.", 2000)
             return
 
         try:
             with open(file_path, 'r') as f:
                 project_data = json.load(f)
 
-            # Basic validation of project file structure
             if 'pdf_path' not in project_data or 'defined_areas' not in project_data:
                 QMessageBox.critical(self, "Error", "Invalid project file format.")
+                # Reset to a clean state if opening an invalid project file
+                self.newProject() # Call newProject to ensure a clean state, it handles its own dirty check (which will be false now)
                 return
 
             # --- Successfully read project data, now apply it ---
+            # 1. Reset current state (newProject() already called if there were unsaved changes,
+            #    but we need to ensure a clean slate before loading new data regardless)
+            #    Calling newProject() here again is a bit heavy if _promptToSaveUnsavedChanges
+            #    already resulted in a save or discard.
+            #    Let's refine this: newProject() should be the one to clear state *after* successful save/discard.
+            #    Here, we need to ensure the *current* state is cleared if it wasn't already by the prompt.
+            
+            # If _promptToSaveUnsavedChanges returned True, it means either:
+            #   a) project wasn't dirty
+            #   b) project was dirty, user saved successfully (project_is_dirty is now False)
+            #   c) project was dirty, user discarded (project_is_dirty should be considered False for the new load)
+            # So, we can now safely clear the current state variables before loading.
 
-            # 1. Reset current state (like "New Project")
-            self.newProject() # This clears pdf_document, paths, defined_areas, visuals etc.
+            # Clear current state *before* loading new project data
+            if self.pdf_document:
+                self.pdf_document.close()
+            self.pdf_document = None
+            self.current_pdf_path = None
+            # self.current_project_path will be set by the loaded project
+            self.defined_pdf_areas = []
+            self.pdf_display_label.clearDefinedRects()
+            self._reset_pdf_display_label("Loading project...") # Resets display label and nav
+            # self.current_page_num and zoom will be set from project data or defaults
 
             # 2. Attempt to load the PDF specified in the project file
             loaded_pdf_path = project_data['pdf_path']
-            
-            # Temporarily store defined areas from file, as openPdfFile will clear self.defined_pdf_areas
             project_defined_areas = project_data.get('defined_areas', [])
             
-            # Attempt to open the PDF.
-            # We'll call a slightly modified or a direct way to open PDF without full reset of areas yet.
-            # For now, let's assume openPdfFile is called and then we repopulate.
-            
-            # --- Re-evaluate PDF opening part ---
-            # Option A: Use existing openPdfFile, then overwrite defined_areas
-            # Option B: Create a leaner _loadPdfDocument(path) that doesn't reset everything
-
-            # Let's try Option A carefully:
-            # newProject() has already cleared everything.
-            # Now, specifically load the PDF document.
-            
-            try: # Inner try for PDF loading specifically from project file
+            try: 
                 doc = fitz.open(loaded_pdf_path)
-                if not doc.is_pdf: # Should ideally not happen if saved correctly
+                if not doc.is_pdf:
                     doc.close()
                     QMessageBox.critical(self, "Project Error", f"The linked file '{loaded_pdf_path}' is not a valid PDF.")
-                    # State is already reset by newProject(), so just return
+                    self._markProjectAsDirty(False) # Reset to clean, empty state
+                    self._updateWindowTitle()
+                    self._updateNavigation()
+                    self._updateZoomActionStates()
                     return
                 
-                # If PDF loaded from project path is successful:
                 self.pdf_document = doc
-                self.current_pdf_path = loaded_pdf_path # Set current PDF path
-                self.current_project_path = file_path # Set current PROJECT path
-                self.current_page_num = 0 # Start at first page
-                self.current_zoom_factor = project_data.get('zoom_factor', 1.5) # Load zoom if saved, else default
-
-                self.info_label.setText(f"Loaded: {loaded_pdf_path.split('/')[-1]} ({self.pdf_document.page_count} pages)")
+                self.current_pdf_path = loaded_pdf_path
+                self.current_project_path = file_path # This is the opened project's path
+                self.current_page_num = project_data.get('start_page_num', 0) # Optional: save/load start page
                 
-                # 3. Restore defined areas
-                self.defined_pdf_areas = project_defined_areas # Restore from file
-                
-                # 4. Display the first page (this will also trigger redisplay of visual rects IF integrated there)
-                self.displayPdfPage(self.current_page_num) # This now needs to also draw the rects
+                loaded_zoom = project_data.get('zoom_factor', 1.5)
+                closest_level_index = min(range(len(self.zoom_levels)), 
+                                          key=lambda i: abs(self.zoom_levels[i] - loaded_zoom))
+                self.current_zoom_level_index = closest_level_index
+                self.current_zoom_factor = self.zoom_levels[self.current_zoom_level_index]
 
-                # 5. Update UI states
+                self.info_label.setText(f"Project: {file_path.split('/')[-1].split('\\')[-1]}")
+                
+                self.defined_pdf_areas = project_defined_areas
+                
+                self.displayPdfPage(self.current_page_num) # Displays page and its defined areas
+
                 self.save_project_as_action.setEnabled(True)
-                self.save_project_action.setEnabled(True) # Project is now "saved" to current_project_path
+                self.save_project_action.setEnabled(True) 
                 self.statusBar().showMessage(f"Project '{file_path.split('/')[-1]}' opened.", 5000)
+                self._updateZoomActionStates()
+                self._markProjectAsDirty(False) # Freshly opened project is considered clean
+                # _updateWindowTitle is called by _markProjectAsDirty
+                self.undo_stack.clear()
+                self.redo_stack.clear()
+                self._updateUndoRedoActionStates()
                 print(f"Project opened. Defined areas: {len(self.defined_pdf_areas)}")
 
             except Exception as e_pdf:
                 QMessageBox.critical(self, "Error Loading PDF from Project", 
                                      f"Could not load PDF '{loaded_pdf_path}': {e_pdf}")
-                # State was already reset by newProject(), so just inform user.
-                # self._reset_pdf_display_label and _updateNavigation were called by newProject()
+                self._markProjectAsDirty(False) # Reset to clean, empty state
+                self._updateWindowTitle()
+                self._updateNavigation()
+                self._updateZoomActionStates()
                 return
 
         except FileNotFoundError:
@@ -1158,8 +1730,8 @@ class DesignerApp(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not parse project file. Invalid JSON: {file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error Opening Project", f"An unexpected error occurred: {e}")
-            self.newProject() # Reset to a clean state on generic error
-
+            # Reset to a clean state on generic error by effectively calling newProject's core logic
+            self._reset_to_new_project_state() # You might need a dedicated method for this internal reset
 
 # ... (Inside DesignerApp class)
 
@@ -1194,6 +1766,18 @@ class DesignerApp(QMainWindow):
             self.info_label.setText("Mode: Move Area. Click and drag an existing area to move it.")
             self.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor) # Or SizeAllCursor
             print("Move Area tool active")
+        elif new_tool_id == "draw_rectangle":
+            self.info_label.setText("Mode: Draw Rectangle. Click and drag to define.")
+            self.pdf_display_label.setCursor(Qt.CursorShape.CrossCursor)
+            print("Draw Rectangle tool active")
+        elif new_tool_id == "draw_oval":
+            self.info_label.setText("Mode: Draw Oval. Click and drag to define bounding box.")
+            self.pdf_display_label.setCursor(Qt.CursorShape.CrossCursor)
+            print("Draw Oval tool active")
+        elif new_tool_id == "draw_line":
+            self.info_label.setText("Mode: Draw Line. Click and drag from start to end point.")
+            self.pdf_display_label.setCursor(Qt.CursorShape.CrossCursor)
+            print("Draw Line tool active")
         else: 
             # This case should ideally not be reached if all toolbar actions have valid setData
             self.current_drawing_tool = None 
@@ -1217,63 +1801,17 @@ class DesignerApp(QMainWindow):
     def deleteSelectedArea(self):
         if not self.currently_selected_area_instance_id:
             print("No area selected to delete.")
+            # self.statusBar().showMessage("No area selected to delete.", 2000) # Optional: Status bar msg is now in command
             return
 
-        selected_id = self.currently_selected_area_instance_id
-        area_to_delete_page_num = -1
-        area_found_in_data = False
-
-        # Find and remove the area from the data model (self.defined_pdf_areas)
-        for i, area_info in enumerate(self.defined_pdf_areas):
-            if area_info['instance_id'] == selected_id:
-                area_to_delete_page_num = area_info['page_num']
-                del self.defined_pdf_areas[i]
-                area_found_in_data = True
-                print(f"Data for area {selected_id} removed from self.defined_pdf_areas.")
-                break
+        # Create the command object
+        command = DeleteAreaCommand(self, self.currently_selected_area_instance_id)
         
-        if not area_found_in_data:
-            print(f"Error: Could not find data for selected area ID {selected_id} to delete.")
-            # Clear selection just in case, though this state should ideally not occur
-            self.handleAreaSelectionChanged(None) 
-            if self.pdf_display_label.selected_visual_info and \
-               self.pdf_display_label.selected_visual_info.get('id') == selected_id:
-                self.pdf_display_label.selected_visual_info = None
-                self.pdf_display_label.update()
-            return
-
-        # Tell InteractivePdfLabel to remove the visual representation
-        # We need the page number where the visual rect was.
-        # The selected_id was on self.pdf_display_label.current_pixmap_page_num
-        # or area_to_delete_page_num if found.
-        
-        # The selection highlight is managed by InteractivePdfLabel's selected_visual_info.
-        # The visual rectangle itself is in InteractivePdfLabel's page_visual_rects.
-        
-        current_label_page = self.pdf_display_label.current_pixmap_page_num
-        if area_to_delete_page_num != -1 : # Check if page_num was found
-            # Remove the visual rectangle from the label's storage
-            removed_visual = self.pdf_display_label.removeVisualRectById(area_to_delete_page_num, selected_id)
-            if removed_visual:
-                print(f"Visual for area {selected_id} on page {area_to_delete_page_num + 1} removed.")
-            else:
-                print(f"Warning: Visual for area {selected_id} on page {area_to_delete_page_num + 1} not found in label's store for removal.")
-
-            # If the deleted area was on the currently displayed page, 
-            # ensure the label updates and clears its own selection state for that ID.
-            if area_to_delete_page_num == current_label_page:
-                if self.pdf_display_label.selected_visual_info and \
-                   self.pdf_display_label.selected_visual_info.get('id') == selected_id:
-                    self.pdf_display_label.selected_visual_info = None 
-                    # No need to emit here, handleAreaSelectionChanged(None) below will do it for DesignerApp
-                self.pdf_display_label.update() # Repaint the label to remove the blue box and highlight
-
-        # Clear the current selection in DesignerApp and update UI (e.g., disable Delete button)
-        self.handleAreaSelectionChanged(None) 
-
-        self.statusBar().showMessage(f"Area {selected_id} deleted.", 3000)
-        print(f"Area {selected_id} deleted. Remaining areas: {len(self.defined_pdf_areas)}")
-        # TODO (Advanced): Mark project as "dirty" / needing save.
+        # Execute the command via the command manager
+        # executeCommand will call command.execute(), handle undo/redo stacks, 
+        # mark project dirty, and the command itself handles UI updates like
+        # clearing selection and status bar messages.
+        self.executeCommand(command)
 
     def keyPressEvent(self, event):
         """Handle key presses for the main window."""
@@ -1294,125 +1832,325 @@ class DesignerApp(QMainWindow):
 
         selected_id = self.currently_selected_area_instance_id
         area_data_to_edit = None
-        area_index = -1
-
-        # Find the area in the data model
-        for i, area_info in enumerate(self.defined_pdf_areas):
+        
+        # Find the current data for the selected area
+        for area_info in self.defined_pdf_areas:
             if area_info['instance_id'] == selected_id:
                 area_data_to_edit = area_info
-                area_index = i
                 break
         
         if not area_data_to_edit:
             QMessageBox.warning(self, "Error", f"Could not find data for selected area ID {selected_id} to edit.")
-            # This state implies an inconsistency, clear selection.
-            self.handleAreaSelectionChanged(None) 
-            if self.pdf_display_label.selected_visual_info and \
-               self.pdf_display_label.selected_visual_info.get('id') == selected_id:
-                self.pdf_display_label.selected_visual_info = None
-                self.pdf_display_label.update()
+            self.handleAreaSelectionChanged(None) # Clear potentially inconsistent selection
             return
 
-        # Pre-fill the dialog with existing properties
+        # Store old properties for the command
+        old_properties = {
+            'data_field_id': area_data_to_edit.get('data_field_id', ''),
+            'prompt': area_data_to_edit.get('prompt', '')
+        }
+
+        # Open the dialog, pre-filled with existing properties
         dialog = AreaPropertiesDialog(
-            area_type=area_data_to_edit.get('type', 'Text Input'), # Get type from data
-            default_data_field_id=area_data_to_edit.get('data_field_id', ''),
-            default_prompt=area_data_to_edit.get('prompt', ''),
+            area_type=area_data_to_edit.get('type', 'Unknown Type'), 
+            default_data_field_id=old_properties['data_field_id'],
+            default_prompt=old_properties['prompt'],
             parent=self
         )
-        dialog.setWindowTitle(f"Edit Area Properties (ID: {selected_id})") # Update dialog title
+        dialog.setWindowTitle(f"Edit Area Properties (ID: {selected_id})")
 
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_properties = dialog.getProperties()
-            if new_properties and new_properties["data_field_id"]: # Ensure new data_field_id is not empty
-                # Update the existing dictionary in self.defined_pdf_areas
-                self.defined_pdf_areas[area_index]['data_field_id'] = new_properties['data_field_id']
-                self.defined_pdf_areas[area_index]['prompt'] = new_properties['prompt']
-                # Type is not editable in this dialog for now, so it remains unchanged.
-                # instance_id, page_num, rect_pdf, view_qrect_tuple also remain unchanged by this edit.
+            new_properties_from_dialog = dialog.getProperties()
+            
+            if new_properties_from_dialog and new_properties_from_dialog["data_field_id"]:
+                # Check if anything actually changed
+                if old_properties['data_field_id'] == new_properties_from_dialog['data_field_id'] and \
+                   old_properties['prompt'] == new_properties_from_dialog['prompt']:
+                    self.statusBar().showMessage("No changes made to properties.", 2000)
+                    return # No actual change, so no command needed
 
-                print(f"Properties updated for area {selected_id}:")
-                print(f"  New Data Field ID: {new_properties['data_field_id']}")
-                print(f"  New Prompt: {new_properties['prompt']}")
-                self.statusBar().showMessage(f"Properties for area {selected_id} updated.", 3000)
-                # TODO (Advanced): If data_field_id changed, and if we had color-coding by family,
-                # we might need to tell InteractivePdfLabel to update the color of this visual rect.
-                # For now, the blue box's appearance doesn't change based on this metadata edit.
-                # Also, mark project as "dirty" / needing save.
-            else:
+                # Properties changed, create and execute the command
+                command = EditAreaPropertiesCommand(self, selected_id, old_properties, new_properties_from_dialog)
+                self.executeCommand(command)
+                # The command's execute method handles updating self.defined_pdf_areas and status bar.
+                # self._markProjectAsDirty() is handled by executeCommand.
+            
+            else: # Dialog accepted, but data_field_id was empty
                 QMessageBox.warning(self, "Missing Information", 
                                     "Data Field Name / Link ID cannot be empty. Properties not updated.")
         else:
             print(f"Editing properties for area {selected_id} cancelled.")
 
-    def handleAreaMoved(self, instance_id, new_view_qrect):
-        """Handles the data update after a visual area has been moved."""
-        if not self.pdf_document: # Should not happen if an area was moved
+    def handleAreaMoved(self, instance_id, new_view_qrect): # new_view_qrect is from the signal
+        """Handles the signal after a visual area has been moved in InteractivePdfLabel."""
+        if not self.pdf_document:
             return
 
-        area_updated = False
-        for i, area_info in enumerate(self.defined_pdf_areas):
+        old_area_info = None
+        for area_info in self.defined_pdf_areas:
             if area_info['instance_id'] == instance_id:
-                # Transform the new view_qrect back to PDF page coordinates
-                inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
-                
-                view_fitz_rect = fitz.Rect(new_view_qrect.x(), new_view_qrect.y(),
-                                           new_view_qrect.right(), new_view_qrect.bottom())
-                pdf_fitz_rect = view_fitz_rect * inverse_matrix
-
-                # Update the stored data
-                self.defined_pdf_areas[i]['rect_pdf'] = tuple(pdf_fitz_rect.irect)
-                self.defined_pdf_areas[i]['view_qrect_tuple'] = (new_view_qrect.x(), new_view_qrect.y(),
-                                                                 new_view_qrect.width(), new_view_qrect.height())
-                area_updated = True
-                
-                print(f"DesignerApp: Area {instance_id} data updated after move.")
-                print(f"  New View Coords Tuple: {self.defined_pdf_areas[i]['view_qrect_tuple']}")
-                print(f"  New PDF Coords: {self.defined_pdf_areas[i]['rect_pdf']}")
-                self.statusBar().showMessage(f"Area {instance_id} moved.", 3000)
-                # TODO: Mark project as dirty (needs saving)
+                old_area_info = area_info.copy() # Get a copy of the current state
                 break
         
-        if not area_updated:
-            print(f"Warning: Could not find area with ID {instance_id} in self.defined_pdf_areas to update after move.")
-
-    def handleAreaResized(self, instance_id, new_view_qrect):
-        """Handles the data update after a visual area has been resized."""
-        if not self.pdf_document: # Should not happen if an area was resized
+        if not old_area_info:
+            print(f"Error: Data for moved area {instance_id} not found in DesignerApp.")
             return
 
-        area_updated = False
-        for i, area_info in enumerate(self.defined_pdf_areas):
+        # Old state (already stored in PDF and view tuple formats)
+        old_pdf_rect_tuple = old_area_info['rect_pdf']
+        old_view_qrect_tuple = old_area_info['view_qrect_tuple']
+        page_num = old_area_info['page_num'] # Page number doesn't change on move
+
+        # New state from the signal (new_view_qrect)
+        # Transform this new_view_qrect to new PDF coordinates
+        inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+        new_view_fitz_rect = fitz.Rect(new_view_qrect.x(), new_view_qrect.y(),
+                                       new_view_qrect.right(), new_view_qrect.bottom())
+        new_pdf_fitz_rect = new_view_fitz_rect * inverse_matrix
+        new_pdf_rect_tuple = tuple(new_pdf_fitz_rect.irect)
+        new_view_qrect_tuple = (new_view_qrect.x(), new_view_qrect.y(),
+                                new_view_qrect.width(), new_view_qrect.height())
+
+        # Create and execute the command
+        # Ensure the arguments here match the variables defined above
+        command = MoveAreaCommand(self, instance_id, page_num,
+                                  old_view_qrect_tuple,  
+                                  new_view_qrect_tuple,  
+                                  old_pdf_rect_tuple,
+                                  new_pdf_rect_tuple)
+        self.executeCommand(command)
+        
+        print(f"MoveAreaCommand created for Instance ID: {instance_id}")
+
+    def handleAreaResized(self, instance_id, new_view_qrect): # new_view_qrect from signal
+        """Handles the signal after a visual area has been resized in InteractivePdfLabel."""
+        if not self.pdf_document:
+            return
+
+        old_area_info = None
+        for area_info in self.defined_pdf_areas:
             if area_info['instance_id'] == instance_id:
-                # Transform the new view_qrect back to PDF page coordinates
-                inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
-                
-                # Ensure QRect has positive width/height before converting to fitz.Rect
-                # (though it should be normalized from InteractivePdfLabel)
-                normalized_view_qrect = new_view_qrect.normalized()
-
-                view_fitz_rect = fitz.Rect(normalized_view_qrect.x(), normalized_view_qrect.y(),
-                                           normalized_view_qrect.right(), normalized_view_qrect.bottom())
-                pdf_fitz_rect = view_fitz_rect * inverse_matrix
-
-                # Update the stored data
-                self.defined_pdf_areas[i]['rect_pdf'] = tuple(pdf_fitz_rect.irect)
-                self.defined_pdf_areas[i]['view_qrect_tuple'] = (normalized_view_qrect.x(), 
-                                                                 normalized_view_qrect.y(),
-                                                                 normalized_view_qrect.width(), 
-                                                                 normalized_view_qrect.height())
-                area_updated = True
-                
-                print(f"DesignerApp: Area {instance_id} data updated after resize.")
-                print(f"  New View Coords Tuple: {self.defined_pdf_areas[i]['view_qrect_tuple']}")
-                print(f"  New PDF Coords: {self.defined_pdf_areas[i]['rect_pdf']}")
-                self.statusBar().showMessage(f"Area {instance_id} resized.", 3000)
-                # TODO: Mark project as dirty (needs saving)
-                # TODO: If colors/styles are dependent on data that changed, update visual
+                old_area_info = area_info.copy() # Get a copy of the current state (before visual resize)
                 break
         
-        if not area_updated:
-            print(f"Warning: Could not find area with ID {instance_id} in self.defined_pdf_areas to update after resize.")
+        if not old_area_info:
+            print(f"Error: Data for resized area {instance_id} not found in DesignerApp.")
+            return
+
+        # Old state from the data model
+        old_pdf_rect_tuple = old_area_info['rect_pdf']
+        old_view_qrect_tuple = old_area_info['view_qrect_tuple']
+        page_num = old_area_info['page_num'] # Page number doesn't change on resize
+
+        # New state from the signal (new_view_qrect from the visual resize)
+        # Transform this new_view_qrect to new PDF coordinates
+        inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+        
+        # Ensure QRect has positive width/height before converting (already normalized by InteractivePdfLabel)
+        normalized_new_view_qrect = new_view_qrect.normalized()
+        new_view_fitz_rect = fitz.Rect(normalized_new_view_qrect.x(), normalized_new_view_qrect.y(),
+                                       normalized_new_view_qrect.right(), normalized_new_view_qrect.bottom())
+        new_pdf_fitz_rect = new_view_fitz_rect * inverse_matrix
+        new_pdf_rect_tuple = tuple(new_pdf_fitz_rect.irect)
+        new_view_qrect_tuple_for_storage = (normalized_new_view_qrect.x(), normalized_new_view_qrect.y(),
+                                            normalized_new_view_qrect.width(), normalized_new_view_qrect.height())
+
+        # Create and execute the command
+        command = ResizeAreaCommand(self, instance_id, page_num,
+                                    old_view_qrect_tuple, new_view_qrect_tuple_for_storage,
+                                    old_pdf_rect_tuple, new_pdf_rect_tuple)
+        self.executeCommand(command)
+        
+        # The command's execute method now handles updating self.defined_pdf_areas,
+        # calling InteractivePdfLabel.updateVisualRectPositionAndStyle, and status bar.
+        # self._markProjectAsDirty() is handled by executeCommand.
+        print(f"ResizeAreaCommand created for Instance ID: {instance_id}")
+
+    def _updateZoomActionStates(self):
+        """Enables/disables zoom actions based on current zoom level and PDF loaded state."""
+        pdf_loaded = self.pdf_document is not None
+        
+        can_zoom_in = pdf_loaded and self.current_zoom_level_index < len(self.zoom_levels) - 1
+        can_zoom_out = pdf_loaded and self.current_zoom_level_index > 0
+        
+        if hasattr(self, 'zoom_in_action'):
+            self.zoom_in_action.setEnabled(can_zoom_in)
+        if hasattr(self, 'zoom_out_action'):
+            self.zoom_out_action.setEnabled(can_zoom_out)
+        
+        # Later, update a zoom level display label if we add one
+        # if pdf_loaded and hasattr(self, 'zoom_level_label'):
+        #     self.zoom_level_label.setText(f"{int(self.current_zoom_factor * 100)}%")
+        # elif hasattr(self, 'zoom_level_label'):
+        #     self.zoom_level_label.setText("---%")
+
+
+    def zoomIn(self):
+        if self.pdf_document and self.current_zoom_level_index < len(self.zoom_levels) - 1:
+            self.current_zoom_level_index += 1
+            self.current_zoom_factor = self.zoom_levels[self.current_zoom_level_index]
+            print(f"Zoom In. New factor: {self.current_zoom_factor} (Level: {self.current_zoom_level_index})")
+            self.displayPdfPage(self.current_page_num) # Re-render the current page
+            self._updateZoomActionStates()
+
+    def zoomOut(self):
+        if self.pdf_document and self.current_zoom_level_index > 0:
+            self.current_zoom_level_index -= 1
+            self.current_zoom_factor = self.zoom_levels[self.current_zoom_level_index]
+            print(f"Zoom Out. New factor: {self.current_zoom_factor} (Level: {self.current_zoom_level_index})")
+            self.displayPdfPage(self.current_page_num) # Re-render the current page
+            self._updateZoomActionStates()
+
+    def _updateWindowTitle(self):
+        """Updates the main window title to include project name and dirty status."""
+        title = "SpeedyF Designer"
+        project_name = ""
+        if self.current_project_path:
+            project_name = self.current_project_path.split('/')[-1].split('\\')[-1]
+        elif self.current_pdf_path: # If no project path, but PDF is loaded
+            project_name = self.current_pdf_path.split('/')[-1].split('\\')[-1] + " (untitled project)"
+        else:
+            project_name = "Untitled"
+
+        if project_name:
+            title += f" - {project_name}"
+
+        if self.project_is_dirty:
+            title += "*"
+
+        self.setWindowTitle(title)
+
+    def _markProjectAsDirty(self, dirty=True):
+        """Marks the project as dirty (or clean) and updates the window title."""
+        if self.project_is_dirty != dirty: # Only update if state changes
+            self.project_is_dirty = dirty
+            self._updateWindowTitle()
+            print(f"Project dirty state: {self.project_is_dirty}")
+            # TODO: Later, we might enable/disable the "Save" action based on dirty state too,
+            # but it's also fine for "Save" to be enabled if a path exists, regardless of dirty state.
+            # For now, save_project_action is enabled if current_project_path exists.
+
+    def closeEvent(self, event):
+        """Handles the event when the user tries to close the main window."""
+        if self.project_is_dirty:
+            reply = QMessageBox.question(self, 'Unsaved Changes',
+                                           "You have unsaved changes. Do you want to save them before closing?",
+                                           QMessageBox.StandardButton.Save | 
+                                           QMessageBox.StandardButton.Discard | 
+                                           QMessageBox.StandardButton.Cancel,
+                                           QMessageBox.StandardButton.Cancel) # Default button
+
+            if reply == QMessageBox.StandardButton.Save:
+                # Attempt to save. If save is successful, proceed to close.
+                # If save is cancelled by user (e.g. in Save As dialog), then ignore close event.
+                if self.current_project_path:
+                    self.saveProject() # Save to existing path
+                    if not self.project_is_dirty: # Check if save was successful (project is no longer dirty)
+                        event.accept() # Allow window to close
+                    else:
+                        event.ignore() # Save might have failed or been cancelled by user from a "Save As"
+                else: # No current project path, so trigger "Save As"
+                    self.saveProjectAs()
+                    if not self.project_is_dirty: # Check if "Save As" was successful
+                        event.accept()
+                    else:
+                        event.ignore() # "Save As" was cancelled by user or failed
+            
+            elif reply == QMessageBox.StandardButton.Discard:
+                event.accept() # Discard changes and allow window to close
+            
+            else: # QMessageBox.StandardButton.Cancel or closed dialog
+                event.ignore() # Cancel the close operation, keep window open
+        else:
+            event.accept() # No unsaved changes, allow window to close normally
+
+    def _promptToSaveUnsavedChanges(self):
+        """
+        Checks for unsaved changes and prompts the user to save.
+        Returns True if the operation should proceed (changes saved or discarded),
+        False if the operation should be cancelled.
+        """
+        if not self.project_is_dirty:
+            return True # No unsaved changes, proceed
+
+        project_name_display = "the current project"
+        if self.current_project_path:
+            project_name_display = self.current_project_path.split('/')[-1].split('\\')[-1]
+        elif self.current_pdf_path:
+             pdf_basename = self.current_pdf_path.split('/')[-1].split('\\')[-1]
+             project_name_display = f"'{pdf_basename} (untitled project)'"
+
+
+        reply = QMessageBox.question(self, 'Unsaved Changes',
+                                       f"You have unsaved changes in {project_name_display}.\n"
+                                       "Do you want to save them?",
+                                       QMessageBox.StandardButton.Save | 
+                                       QMessageBox.StandardButton.Discard | 
+                                       QMessageBox.StandardButton.Cancel,
+                                       QMessageBox.StandardButton.Cancel)
+
+        if reply == QMessageBox.StandardButton.Save:
+            if self.current_project_path:
+                self.saveProject()
+            else:
+                self.saveProjectAs()
+            
+            # If save was cancelled (e.g., user cancelled "Save As" dialog),
+            # project_is_dirty will still be True. In this case, cancel the calling operation.
+            return not self.project_is_dirty # Proceed only if save was successful (not dirty)
+        
+        elif reply == QMessageBox.StandardButton.Discard:
+            return True # Proceed, discarding changes
+        
+        else: # QMessageBox.StandardButton.Cancel or closed dialog
+            return False # Cancel the calling operation
+
+    def _updateUndoRedoActionStates(self):
+        """Updates the enabled state of Undo and Redo actions."""
+        if hasattr(self, 'undo_action'): # Check if actions exist
+            self.undo_action.setEnabled(len(self.undo_stack) > 0)
+        if hasattr(self, 'redo_action'):
+            self.redo_action.setEnabled(len(self.redo_stack) > 0)
+
+    def executeCommand(self, command):
+        """
+        Executes a command, adds it to the undo stack, and clears the redo stack.
+        A 'command' object is expected to have execute() and undo() methods.
+        """
+        # In a real implementation, command.execute() might return success/failure
+        command.execute() # Assuming command.execute() performs the action
+
+        self.undo_stack.append(command)
+        self.redo_stack.clear() # A new action clears the redo history
+
+        self._updateUndoRedoActionStates()
+        self._markProjectAsDirty() # Any executed command makes the project dirty
+        print(f"Command executed. Undo stack size: {len(self.undo_stack)}, Redo stack size: {len(self.redo_stack)}")
+
+
+    def undo(self):
+        if not self.undo_stack:
+            return
+
+        command = self.undo_stack.pop()
+        command.undo() # Assuming command.undo() performs the reversal
+
+        self.redo_stack.append(command)
+        self._updateUndoRedoActionStates()
+        self._markProjectAsDirty() # Undoing an action also makes the project dirty relative to its last saved state
+        print(f"Command undone. Undo stack size: {len(self.undo_stack)}, Redo stack size: {len(self.redo_stack)}")
+
+    def redo(self):
+        if not self.redo_stack:
+            return
+
+        command = self.redo_stack.pop()
+        command.execute() # Or command.redo() if it's different
+
+        self.undo_stack.append(command)
+        self._updateUndoRedoActionStates()
+        self._markProjectAsDirty()
+        print(f"Command redone. Undo stack size: {len(self.undo_stack)}, Redo stack size: {len(self.redo_stack)}")
 
 # Main function remains the same
 def main():
