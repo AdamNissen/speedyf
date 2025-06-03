@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
 
 # QtGui - QActionGroup added here
 from PyQt6.QtGui import (QPixmap, QImage, QPainter, QPen, QAction, QIcon, 
-                         QKeySequence, QActionGroup, QBrush) # Added QActionGroup
+                         QKeySequence, QActionGroup, QBrush, QColor) # Added QActionGroup
 
 from PyQt6.QtCore import Qt, QPoint, QRect, pyqtSignal
 import fitz  # PyMuPDF
@@ -52,7 +52,7 @@ class AreaPropertiesDialog(QDialog):
 
         layout.addWidget(self.button_box)
 
-        self.setLayout(layout)
+        #self.setLayout(layout)
         self.setMinimumWidth(350) # Set a reasonable minimum width
 
     def getProperties(self):
@@ -64,8 +64,6 @@ class AreaPropertiesDialog(QDialog):
                 # 'type' is already known by the caller (DesignerApp)
             }
         return None # Or raise an exception, or return an empty dict
-
-# ... (Near other class definitions, or at the top after imports)
 
 class Command: # A conceptual base class, or just an informal interface for now
     def __init__(self, app_context, description="Generic Command"):
@@ -159,12 +157,8 @@ class DeleteAreaCommand(Command):
 
 class AddAreaCommand(Command):
     def __init__(self, app_context, area_info_to_add):
-        # area_info_to_add is the complete dictionary for the new area
-        # It should include: instance_id, page_num, rect_pdf, view_qrect_tuple,
-        #                    data_field_id, type, prompt
-        super().__init__(app_context, f"Add Area: {area_info_to_add.get('data_field_id', 'Unknown')}")
-        self.area_info = area_info_to_add
-        # The instance_id must be part of area_info_to_add, generated before command creation
+        super().__init__(app_context, f"Add Area: {area_info_to_add.get('data_field_id', area_info_to_add.get('instance_id', 'Unknown'))}")
+        self.area_info = area_info_to_add # This dict contains all necessary info
 
     def execute(self):
         # 1. Add to data model
@@ -176,26 +170,49 @@ class AddAreaCommand(Command):
         vqt = self.area_info['view_qrect_tuple']
         view_qrect = QRect(vqt[0], vqt[1], vqt[2], vqt[3])
         instance_id = self.area_info['instance_id']
-        # area_type = self.area_info['type'] # Already have this
-        outline_rgba = self.area_info.get('outline_color_rgba')
+        
+        # **** FETCH area_type AND VISUAL PROPS FROM self.area_info ****
+        area_type = self.area_info['type'] 
+        outline_rgba = self.area_info.get('outline_color_rgba') # .get() for safety if not present
         fill_rgba = self.area_info.get('fill_color_rgba')
         outline_w = self.area_info.get('outline_width')
         
-        self.app.pdf_display_label.addVisualRect(page_num, view_qrect, instance_id, area_type,
-                                                 outline_color_rgba=outline_rgba,
-                                                 fill_color_rgba=fill_rgba,
-                                                 outline_width=outline_w)
-        
-        self.app.pdf_display_label.addVisualRect(page_num, view_qrect, instance_id, area_type)
+        self.app.pdf_display_label.addVisualRect(
+            page_num, 
+            view_qrect, 
+            instance_id, 
+            area_type, # Now defined
+            outline_color_rgba=outline_rgba,
+            fill_color_rgba=fill_rgba,
+            outline_width=outline_w
+        )
         print(f"Command: Visual for area {instance_id} on page {page_num + 1} added.")
+        self.app.statusBar().showMessage(f"Area '{self.area_info.get('data_field_id', instance_id)}' added.", 3000)
+        return True
 
-        # 3. Optional: Select the newly added area
-        # self.app.pdf_display_label.selected_visual_info = {'rect': view_qrect, 'id': instance_id, 'type': area_type}
-        # self.app.handleAreaSelectionChanged(instance_id) # This would also update UI
-        # For now, let's not auto-select to keep it simple. User can click to select.
+    def undo(self):
+        removed_from_data = False
+        for i, area in enumerate(self.app.defined_pdf_areas):
+            if area['instance_id'] == self.area_info['instance_id']:
+                del self.app.defined_pdf_areas[i]
+                removed_from_data = True
+                print(f"Command Undo: Area {self.area_info['instance_id']} removed from defined_pdf_areas.")
+                break
+        
+        if not removed_from_data:
+            print(f"Command Undo Error: Could not find {self.area_info['instance_id']} in defined_pdf_areas.")
+            return False
 
-        self.app.statusBar().showMessage(f"Area '{self.area_info['data_field_id']}' added.", 3000)
-        return True # Indicate success
+        page_num = self.area_info['page_num']
+        instance_id = self.area_info['instance_id']
+        self.app.pdf_display_label.removeVisualRectById(page_num, instance_id)
+        print(f"Command Undo: Visual for area {instance_id} on page {page_num + 1} removed.")
+
+        if self.app.currently_selected_area_instance_id == instance_id:
+            self.app.handleAreaSelectionChanged(None)
+
+        self.app.statusBar().showMessage(f"Addition of area '{self.area_info.get('data_field_id', instance_id)}' undone.", 3000)
+        return True
 
     def undo(self):
         # 1. Remove from data model (find by instance_id)
@@ -398,7 +415,7 @@ class ResizeAreaCommand(Command):
         self.app.statusBar().showMessage(f"Resize of area {self.instance_id} undone.", 3000)
         return True
 
-# For handle identification
+# For handle identification (place these constants outside/before the class)
 HANDLE_SIZE = 8
 H_TOP_LEFT, H_TOP_MIDDLE, H_TOP_RIGHT, \
 H_MIDDLE_LEFT, H_MIDDLE_RIGHT, \
@@ -406,48 +423,41 @@ H_BOTTOM_LEFT, H_BOTTOM_MIDDLE, H_BOTTOM_RIGHT = range(8)
 
 class InteractivePdfLabel(QLabel):
     rectDefinedSignal = pyqtSignal(QRect)
-    areaSelectionChangedSignal = pyqtSignal(object)
+    areaSelectionChangedSignal = pyqtSignal(object) 
     areaMovedSignal = pyqtSignal(str, QRect)
-    # **** NEW: Signal for when a resize is completed ****
-    areaResizedSignal = pyqtSignal(str, QRect) # instance_id, new_view_qrect
+    areaResizedSignal = pyqtSignal(str, QRect)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent_widget = parent
-        self.setMouseTracking(True) # **** NEW: Enable mouse tracking for hover events ****
+        self.parent_widget = parent # Should be DesignerApp instance
+        self.setMouseTracking(True)
         
         self.current_rubber_band_rect = None
         self.origin_point = None      
         self.page_visual_rects = {} 
         self.current_pixmap_page_num = None
-        self.selected_visual_info = None # Stores {'rect': QRect, 'id': str, 'type': str}
-        self.page_visual_rects = {} 
+        self.selected_visual_info = None 
+
         self.is_moving_selection = False
         self.drag_start_mouse_pos = None     
         self.drag_start_rect_pos = None   
 
-        # **** NEW: Attributes for resizing ****
         self.is_resizing_selection = False
-        self.active_resize_handle = None # Stores which handle is being dragged (e.g., H_TOP_LEFT)
-        self.resize_start_mouse_pos = None # Mouse pos when resize started
-        self.resize_start_rect = None      # QRect: Geometry of rect when resize started
+        self.active_resize_handle = None 
+        self.resize_start_mouse_pos = None 
+        self.resize_start_rect = None      
 
     def _get_handle_rects(self, base_rect):
-        """Returns a dictionary of QRects for the 8 resize handles of a given base_rect."""
         if not base_rect or base_rect.isNull():
             return {}
-
         hs = HANDLE_SIZE
         hs_half = hs // 2
-
         handles = {
             H_TOP_LEFT: QRect(base_rect.left() - hs_half, base_rect.top() - hs_half, hs, hs),
             H_TOP_MIDDLE: QRect(base_rect.center().x() - hs_half, base_rect.top() - hs_half, hs, hs),
-            H_TOP_RIGHT: QRect(base_rect.right() - hs_half + 1, base_rect.top() - hs_half, hs, hs), # +1 for visual alignment
-            
+            H_TOP_RIGHT: QRect(base_rect.right() - hs_half + 1, base_rect.top() - hs_half, hs, hs),
             H_MIDDLE_LEFT: QRect(base_rect.left() - hs_half, base_rect.center().y() - hs_half, hs, hs),
             H_MIDDLE_RIGHT: QRect(base_rect.right() - hs_half + 1, base_rect.center().y() - hs_half, hs, hs),
-
             H_BOTTOM_LEFT: QRect(base_rect.left() - hs_half, base_rect.bottom() - hs_half + 1, hs, hs),
             H_BOTTOM_MIDDLE: QRect(base_rect.center().x() - hs_half, base_rect.bottom() - hs_half + 1, hs, hs),
             H_BOTTOM_RIGHT: QRect(base_rect.right() - hs_half + 1, base_rect.bottom() - hs_half + 1, hs, hs),
@@ -455,367 +465,240 @@ class InteractivePdfLabel(QLabel):
         return handles
 
     def _get_handle_at_pos(self, pos, base_rect):
-        """Checks if pos is over any handle of base_rect. Returns handle ID or None."""
         handle_rects = self._get_handle_rects(base_rect)
         for handle_id, handle_r in handle_rects.items():
             if handle_r.contains(pos):
                 return handle_id
         return None
 
-    # **** NEW METHOD ****
     def setCurrentPixmapPage(self, page_num):
-        """Sets the page number for the currently displayed pixmap."""
         self.current_pixmap_page_num = page_num
-        self.update() # Trigger a repaint to show rects for the new page
+        old_selected_id = None
+        if self.selected_visual_info:
+            old_selected_id = self.selected_visual_info['id']
+            # Check if selected item is on the new page
+            is_selected_on_new_page = any(
+                info['id'] == old_selected_id 
+                for info in self.page_visual_rects.get(self.current_pixmap_page_num, [])
+            )
+            if not is_selected_on_new_page:
+                self.selected_visual_info = None
+                self.areaSelectionChangedSignal.emit(None) # Emit only if selection actually changes to None
+        self.update()
 
     def addVisualRect(self, page_num, view_qrect, instance_id, area_type, 
-                      outline_color_rgba=None, fill_color_rgba=None, outline_width=None): # Added properties
+                      outline_color_rgba=None, fill_color_rgba=None, outline_width=None):
         if page_num not in self.page_visual_rects:
             self.page_visual_rects[page_num] = []
-        
         item_info = {
-            'rect': view_qrect, 
-            'id': instance_id, 
-            'type': area_type,
-            'outline_color_rgba': outline_color_rgba if outline_color_rgba else (255,0,0,255), # Default red
-            'fill_color_rgba': fill_color_rgba if fill_color_rgba else (0,0,0,0),       # Default transparent
-            'outline_width': outline_width if outline_width is not None else 1             # Default 1px
+            'rect': view_qrect, 'id': instance_id, 'type': area_type,
+            'outline_color_rgba': outline_color_rgba if outline_color_rgba else (255,0,0,255),
+            'fill_color_rgba': fill_color_rgba if fill_color_rgba else (0,0,0,0),
+            'outline_width': outline_width if outline_width is not None else 1
         }
         self.page_visual_rects[page_num].append(item_info)
-        
         if page_num == self.current_pixmap_page_num:
             self.update()
 
     def mousePressEvent(self, event):
-        # Initial debug print (as you added)
-        if self.parent_widget and hasattr(self.parent_widget, 'current_drawing_tool'):
-            print(f"InteractivePdfLabel.mousePressEvent: Active tool from parent: '{self.parent_widget.current_drawing_tool}'")
-        else:
+        if not (self.parent_widget and hasattr(self.parent_widget, 'current_drawing_tool')):
             print("InteractivePdfLabel.mousePressEvent: Parent widget or current_drawing_tool not available.")
-            return # Cannot proceed without parent context for tool
+            return
+
+        active_tool = self.parent_widget.current_drawing_tool
+        print(f"InteractivePdfLabel.mousePressEvent: Active tool from parent: '{active_tool}'") # Debug
 
         if event.button() == Qt.MouseButton.LeftButton and self.pixmap():
-            active_tool = self.parent_widget.current_drawing_tool
             click_pos = event.pos()
 
+            # Define which tools initiate a drawing drag (rubber band)
             area_definition_tools = ["text_area", "signature_area", "initials_area"]
-            shape_drawing_tools = ["draw_rectangle", "draw_oval", "draw_line"] # NEW
-            
-            # Combine them for initiating a mouse drag for drawing
-            all_drawing_initiation_tools = area_definition_tools + shape_drawing_tools # NEW
+            shape_drawing_tools = ["draw_rectangle", "draw_oval", "draw_line"]
+            all_drawing_initiation_tools = area_definition_tools + shape_drawing_tools
 
-            if active_tool in all_drawing_initiation_tools: # **** MODIFIED CONDITION ****
+            if active_tool in all_drawing_initiation_tools:
                 self.origin_point = click_pos
                 self.current_rubber_band_rect = QRect(self.origin_point, self.origin_point)
-                
-                if self.selected_visual_info is not None: # Deselect if starting a new draw
-                    # ... (deselect logic as before) ...
+                if self.selected_visual_info is not None:
                     self.selected_visual_info = None
                     self.areaSelectionChangedSignal.emit(None)
                 self.update()
             
             elif active_tool == "select_area":
-                # Check for handle grab FIRST if an item is selected
-                if self.selected_visual_info and self.selected_visual_info['rect']:
+                if self.selected_visual_info and self.selected_visual_info['rect']: # Check for handle grab first
                     clicked_handle = self._get_handle_at_pos(click_pos, self.selected_visual_info['rect'])
                     if clicked_handle is not None:
                         self.is_resizing_selection = True
                         self.active_resize_handle = clicked_handle
                         self.resize_start_mouse_pos = click_pos
-                        self.resize_start_rect = QRect(self.selected_visual_info['rect']) # Copy
-                        self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.PointingHandCursor) # Or specific resize cursor
+                        self.resize_start_rect = QRect(self.selected_visual_info['rect'])
+                        self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.PointingHandCursor)
                         print(f"Resize initiated from handle: {clicked_handle}")
                         self.update()
-                        return # Resize initiated, skip normal selection logic
-
-                rect_infos_on_current_page = []
-                if self.current_pixmap_page_num is not None:
-                    rect_infos_on_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
-                
-                hits_info_dicts = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)] # List of dicts
-                # Convert to list of QRects for cycling if your previous Alt+Click logic used list of QRects for hits.
-                # Or, adapt cycling to work with list of dicts. Let's assume hits_info_dicts is what we need for cycling.
-
-                newly_selected_info_dict = None 
+                        return 
+                # Normal selection/deselection logic for "select_area" tool
+                rect_infos_on_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
+                hits_info_dicts = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)]
+                newly_selected_info_dict = None
                 previous_selection_id = self.selected_visual_info['id'] if self.selected_visual_info else None
 
                 if event.modifiers() == Qt.KeyboardModifier.AltModifier and hits_info_dicts:
                     current_sel_index_in_hits = -1
-                    if self.selected_visual_info and self.selected_visual_info in hits_info_dicts: 
+                    if self.selected_visual_info and self.selected_visual_info in hits_info_dicts:
                         current_sel_index_in_hits = hits_info_dicts.index(self.selected_visual_info)
-                    
-                    if current_sel_index_in_hits != -1: 
-                        next_index = (current_sel_index_in_hits + 1) % len(hits_info_dicts) # Your cycling logic for select tool
+                    if current_sel_index_in_hits != -1:
+                        next_index = (current_sel_index_in_hits + 1) % len(hits_info_dicts)
                         newly_selected_info_dict = hits_info_dicts[next_index]
-                    elif hits_info_dicts: 
-                        newly_selected_info_dict = hits_info_dicts[0] 
-                
-                elif not event.modifiers() and hits_info_dicts: 
-                    newly_selected_info_dict = hits_info_dicts[0] # Topmost hit
+                    elif hits_info_dicts:
+                        newly_selected_info_dict = hits_info_dicts[0]
+                elif not event.modifiers() and hits_info_dicts:
+                    newly_selected_info_dict = hits_info_dicts[0]
 
                 if previous_selection_id != (newly_selected_info_dict['id'] if newly_selected_info_dict else None):
                     self.selected_visual_info = newly_selected_info_dict
                     self.areaSelectionChangedSignal.emit(self.selected_visual_info['id'] if self.selected_visual_info else None)
                     self.update()
-                
-                # Your debug print block (ensure it's correctly indented within this elif)
+                # Debug print for select_area
                 if self.selected_visual_info:
                     print(f"InteractivePdfLabel: Area selected by SelectTool - ID: {self.selected_visual_info['id']}")
                 elif previous_selection_id is not None and newly_selected_info_dict is None:
                      print("InteractivePdfLabel: Selection cleared by SelectTool.")
-
-
+            
             elif active_tool == "move_area":
-                # Check for handle grab FIRST if an item is selected for moving
-                if self.selected_visual_info and self.selected_visual_info['rect']:
+                if self.selected_visual_info and self.selected_visual_info['rect']: # Check for handle grab first
                     clicked_handle = self._get_handle_at_pos(click_pos, self.selected_visual_info['rect'])
                     if clicked_handle is not None:
                         self.is_resizing_selection = True
                         self.active_resize_handle = clicked_handle
                         self.resize_start_mouse_pos = click_pos
-                        self.resize_start_rect = QRect(self.selected_visual_info['rect']) # Copy
-                        self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.PointingHandCursor) # Or specific resize cursor
+                        self.resize_start_rect = QRect(self.selected_visual_info['rect'])
+                        self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.PointingHandCursor)
                         print(f"Resize initiated (from MoveTool) from handle: {clicked_handle}")
                         self.update()
-                        return # Resize initiated
-                target_to_move_info = None # This will be the info dict {'rect': QRect, 'id': str, 'type': str}
-                previous_selection_id = self.selected_visual_info['id'] if self.selected_visual_info else None
+                        return
+                # Normal move initiation logic
+                target_to_move_info = None
                 selection_changed_by_this_press = False
-
-                rect_infos_on_current_page = []
-                if self.current_pixmap_page_num is not None:
-                    rect_infos_on_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
+                rect_infos_on_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
 
                 if event.modifiers() == Qt.KeyboardModifier.AltModifier:
-                    # Alt+Click with Move tool: Cycle selection, then prepare to move
                     hits_info_dicts = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)]
                     if hits_info_dicts:
                         current_sel_index_in_hits = -1
                         if self.selected_visual_info and self.selected_visual_info in hits_info_dicts:
                             current_sel_index_in_hits = hits_info_dicts.index(self.selected_visual_info)
-                        
-                        if current_sel_index_in_hits != -1: # Cycle from current selection among hits
+                        if current_sel_index_in_hits != -1:
                             next_index = (current_sel_index_in_hits + 1) % len(hits_info_dicts)
                             target_to_move_info = hits_info_dicts[next_index]
-                        else: # No current selection in hits, or no selection at all, pick first hit (topmost)
+                        else:
                             target_to_move_info = hits_info_dicts[0]
-                        
                         print(f"MoveTool+Alt: Cycled to ID: {target_to_move_info['id'] if target_to_move_info else 'None'}")
-                    # If no hits with Alt, target_to_move_info remains None
-                
-                else: # Normal Click (no Alt) with Move tool
-                    # Priority 1: Is the click on the *currently selected* item?
+                else: # Normal Click with Move tool
                     if self.selected_visual_info and self.selected_visual_info['rect'].contains(click_pos):
                         target_to_move_info = self.selected_visual_info
-                        print(f"MoveTool: Moving already selected ID: {target_to_move_info['id']}")
                     else:
-                        # Priority 2: Clicked not on current selection (or nothing selected), find topmost under cursor
                         hits_info_dicts = [info for info in reversed(rect_infos_on_current_page) if info['rect'].contains(click_pos)]
                         if hits_info_dicts:
-                            target_to_move_info = hits_info_dicts[0] # Topmost
-                            print(f"MoveTool: Selected topmost ID: {target_to_move_info['id']} for move.")
-                        # If no hits (clicked empty space), target_to_move_info remains None
-
-                # Update selection state if it changed due to the (Alt)Click
+                            target_to_move_info = hits_info_dicts[0]
+                
                 if target_to_move_info:
                     if not self.selected_visual_info or self.selected_visual_info['id'] != target_to_move_info['id']:
                         self.selected_visual_info = target_to_move_info
                         self.areaSelectionChangedSignal.emit(self.selected_visual_info['id'])
-                        selection_changed_by_this_press = True # Selection changed, needs update
-                elif self.selected_visual_info: # Clicked empty space, but something was selected
+                        selection_changed_by_this_press = True
+                elif self.selected_visual_info: # Clicked empty space
                     self.selected_visual_info = None
                     self.areaSelectionChangedSignal.emit(None)
                     selection_changed_by_this_press = True
 
-                # Now, if a target was identified (and is now selected), prepare for moving
-                if target_to_move_info: # target_to_move_info is now self.selected_visual_info
+                if target_to_move_info:
                     self.is_moving_selection = True
                     self.drag_start_mouse_pos = click_pos
                     self.drag_start_rect_pos = self.selected_visual_info['rect'].topLeft()
                     self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.ClosedHandCursor)
                     print(f"Move initiated for ID: {self.selected_visual_info['id']}")
-                    if not selection_changed_by_this_press: # If selection didn't change but we start move
-                        self.update() # Ensure visual cues for move (like cursor) take effect if selection didn't change
-                elif selection_changed_by_this_press: # Clicked empty, selection cleared
-                    self.update() # Ensure deselection is painted
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-
-        if self.current_pixmap_page_num is not None:
-            rect_infos_for_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
-            
-            for info in rect_infos_for_current_page:
-                rect_to_draw = info['rect']
-                area_type = info.get('type', 'text_input')
-                
-                # A more consolidated way to set pen/brush:
-                if is_selected:
-                    pen_color = Qt.GlobalColor.green
-                    pen_width = 2
-                    # Selected items generally don't show their type-specific fill, just border
-                    current_brush = QBrush(Qt.BrushStyle.NoBrush) 
-                else: # Not selected - apply type-specific styles
-                    pen_width = 1 # Default for non-selected
-                    if area_type == "signature_area":
-                        pen_color = Qt.GlobalColor.blue
-                        current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.FDiagPattern)
-                    elif area_type == "initials_area":
-                        pen_color = Qt.GlobalColor.blue
-                        current_brush = QBrush(Qt.GlobalColor.darkGray, Qt.BrushStyle.BDiagPattern)
-                    elif area_type == "text_input":
-                        pen_color = Qt.GlobalColor.blue
-                        current_brush = QBrush(Qt.BrushStyle.NoBrush)
-                    elif area_type == "drawing_rectangle":
-                        pen_color = Qt.GlobalColor.red # User specified red
-                        current_brush = QBrush(Qt.BrushStyle.NoBrush) # No fill
-                    # Add drawing_oval, drawing_line here later
-                    else: # Default for unknown types if any
-                        pen_color = Qt.GlobalColor.black 
-                        current_brush = QBrush(Qt.BrushStyle.NoBrush)
-
-                pen = QPen(pen_color, pen_width, Qt.PenStyle.SolidLine)
-                painter.setPen(pen)
-                painter.setBrush(current_brush)
-                
-                # Actual drawing based on type (for now, all are rects from info['rect'])
-                if area_type in ["text_input", "signature_area", "initials_area", "drawing_rectangle"]:
-                    painter.drawRect(rect_to_draw)
-                # elif area_type == "drawing_oval": painter.drawEllipse(rect_to_draw)
-                # elif area_type == "drawing_line": painter.drawLine(rect_to_draw.topLeft(), rect_to_draw.bottomRight())
-
-                pen = QPen(pen_color, pen_width, pen_style)
-                painter.setPen(pen)
-                painter.setBrush(current_brush)
-                
-                # Actual drawing based on type
-                if area_type in ["text_input", "signature_area", "initials_area", "drawing_rectangle"]:
-                    painter.drawRect(rect_to_draw)
-                # Add elif for drawing_oval and drawing_line here later
-                # elif area_type == "drawing_oval":
-                #     painter.drawEllipse(rect_to_draw)
-                # elif area_type == "drawing_line":
-                #     painter.drawLine(rect_to_draw.topLeft(), rect_to_draw.bottomRight())
-
-
-            # Draw resize handles if selected (as before)
-            if self.selected_visual_info and \
-               any(info['id'] == self.selected_visual_info['id'] for info in rect_infos_for_current_page):
-                selected_rect_for_handles = self.selected_visual_info['rect']
-                handle_rects = self._get_handle_rects(selected_rect_for_handles)
-                painter.setPen(QPen(Qt.GlobalColor.black, 1))
-                painter.setBrush(QBrush(Qt.GlobalColor.white))
-                for handle_r in handle_rects.values():
-                    painter.drawRect(handle_r)
-            
-            # Draw rubber band (as before)
-            if self.current_rubber_band_rect is not None and not self.current_rubber_band_rect.isNull():
-                # ...
-                painter.drawRect(self.current_rubber_band_rect)
-
+                    if not selection_changed_by_this_press: self.update()
+                elif selection_changed_by_this_press: self.update()
 
     def mouseMoveEvent(self, event):
         current_pos = event.pos()
         active_tool = self.parent_widget.current_drawing_tool if self.parent_widget else None
 
+        # Define all tools that use rubber-band for defining new shapes/areas
+        area_definition_tools = ["text_area", "signature_area", "initials_area"]
+        shape_drawing_tools = ["draw_rectangle", "draw_oval", "draw_line"]
+        all_drawing_initiation_tools = area_definition_tools + shape_drawing_tools
+
         if self.is_resizing_selection and self.selected_visual_info and self.active_resize_handle is not None:
-            # **** RESIZING LOGIC ****
-            # Operate on a copy of the rectangle's state at the start of the resize
-            new_rect = QRect(self.resize_start_rect) 
-
-            # Adjust the new_rect based on which handle is being dragged
-            if self.active_resize_handle == H_TOP_LEFT:
-                new_rect.setTopLeft(current_pos)
-            elif self.active_resize_handle == H_TOP_MIDDLE:
-                new_rect.setTop(current_pos.y())
-            elif self.active_resize_handle == H_TOP_RIGHT:
-                new_rect.setTopRight(current_pos)
-            elif self.active_resize_handle == H_MIDDLE_LEFT:
-                new_rect.setLeft(current_pos.x())
-            elif self.active_resize_handle == H_MIDDLE_RIGHT:
-                new_rect.setRight(current_pos.x())
-            elif self.active_resize_handle == H_BOTTOM_LEFT:
-                new_rect.setBottomLeft(current_pos)
-            elif self.active_resize_handle == H_BOTTOM_MIDDLE:
-                new_rect.setBottom(current_pos.y())
-            elif self.active_resize_handle == H_BOTTOM_RIGHT:
-                new_rect.setBottomRight(current_pos)
-            
-            # Update the actual rectangle being displayed and stored in page_visual_rects
-            # Ensure normalized (positive width/height)
-            self.selected_visual_info['rect'] = new_rect.normalized() 
+            new_rect = QRect(self.resize_start_rect)
+            if self.active_resize_handle == H_TOP_LEFT: new_rect.setTopLeft(current_pos)
+            elif self.active_resize_handle == H_TOP_MIDDLE: new_rect.setTop(current_pos.y())
+            elif self.active_resize_handle == H_TOP_RIGHT: new_rect.setTopRight(current_pos)
+            elif self.active_resize_handle == H_MIDDLE_LEFT: new_rect.setLeft(current_pos.x())
+            elif self.active_resize_handle == H_MIDDLE_RIGHT: new_rect.setRight(current_pos.x())
+            elif self.active_resize_handle == H_BOTTOM_LEFT: new_rect.setBottomLeft(current_pos)
+            elif self.active_resize_handle == H_BOTTOM_MIDDLE: new_rect.setBottom(current_pos.y())
+            elif self.active_resize_handle == H_BOTTOM_RIGHT: new_rect.setBottomRight(current_pos)
+            self.selected_visual_info['rect'] = new_rect.normalized()
             self.update()
-            return # Handled resize drag, exit
+            return
 
-        elif self.is_moving_selection and self.selected_visual_info: # Moving logic (as before)
+        elif self.is_moving_selection and self.selected_visual_info:
             mouse_delta = current_pos - self.drag_start_mouse_pos
             new_top_left = self.drag_start_rect_pos + mouse_delta
             self.selected_visual_info['rect'].moveTo(new_top_left)
             self.update()
-            return 
+            return
 
+        # **** CORRECTED: Use all_drawing_initiation_tools for rubber band ****
         elif self.origin_point is not None and self.current_rubber_band_rect is not None and \
-             active_tool in ["text_area", "signature_area", "initials_area"]: # Rubber band logic (as before)
+             active_tool in all_drawing_initiation_tools:
             self.current_rubber_band_rect = QRect(self.origin_point, current_pos).normalized()
             self.update()
-            return 
+            return
 
-        # Handle hover for resize/move cursors (no button pressed, as before)
-        # This logic for cursor changes on hover should be preserved from your last working version
+        # Hover logic for cursors (no button pressed)
         if active_tool in ["select_area", "move_area"] and self.selected_visual_info and \
            self.selected_visual_info['rect'] and self.current_pixmap_page_num is not None and \
-           any(info['id'] == self.selected_visual_info['id'] for info in self.page_visual_rects.get(self.current_pixmap_page_num,[])):
-
+           any(info['id'] == self.selected_visual_info['id'] for info in self.page_visual_rects.get(self.current_pixmap_page_num, [])):
             hovered_handle = self._get_handle_at_pos(current_pos, self.selected_visual_info['rect'])
             if hovered_handle is not None:
-                # ... (set appropriate resize cursors based on hovered_handle, as you had before)
                 if hovered_handle in [H_TOP_LEFT, H_BOTTOM_RIGHT]: self.setCursor(Qt.CursorShape.SizeFDiagCursor)
                 elif hovered_handle in [H_TOP_RIGHT, H_BOTTOM_LEFT]: self.setCursor(Qt.CursorShape.SizeBDiagCursor)
                 elif hovered_handle in [H_TOP_MIDDLE, H_BOTTOM_MIDDLE]: self.setCursor(Qt.CursorShape.SizeVerCursor)
                 elif hovered_handle in [H_MIDDLE_LEFT, H_MIDDLE_RIGHT]: self.setCursor(Qt.CursorShape.SizeHorCursor)
-            else: # Not hovering a handle
+            else:
                 if active_tool == "move_area":
                     if self.selected_visual_info['rect'].contains(current_pos):
                         self.setCursor(Qt.CursorShape.OpenHandCursor)
-                    else: # Not on selected item with move tool
-                        self.setCursor(Qt.CursorShape.ArrowCursor) # Or specific move tool default
-                else: # Select tool, not on handle
-                     self.setCursor(Qt.CursorShape.ArrowCursor)
-        elif active_tool not in ["text_area", "signature_area", "initials_area", "move_area"] or not self.selected_visual_info :
-             # Fallback cursor if not a drawing tool and no selection or not move tool
-             # Ensure current tool determines cursor if nothing interactive is happening
-             if active_tool == "select_area": self.setCursor(Qt.CursorShape.ArrowCursor)
-             elif active_tool == "move_area": self.setCursor(Qt.CursorShape.OpenHandCursor) # Default for move tool
-             elif active_tool is None: self.setCursor(Qt.CursorShape.ArrowCursor)
-             # Drawing tools set their own cursor (CrossCursor) via DesignerApp.handleToolSelected
+                    else: self.setCursor(Qt.CursorShape.ArrowCursor)
+                else: self.setCursor(Qt.CursorShape.ArrowCursor) # Select tool, not on handle
+        elif active_tool not in all_drawing_initiation_tools: # Not drawing, not select/move over item
+            if active_tool == "select_area": self.setCursor(Qt.CursorShape.ArrowCursor)
+            elif active_tool == "move_area": self.setCursor(Qt.CursorShape.OpenHandCursor)
+            elif active_tool is None: self.setCursor(Qt.CursorShape.ArrowCursor)
+            # Drawing tools set CrossCursor via DesignerApp.handleToolSelected
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             active_tool = self.parent_widget.current_drawing_tool if self.parent_widget else None
+            
+            area_definition_tools = ["text_area", "signature_area", "initials_area"]
+            shape_drawing_tools = ["draw_rectangle", "draw_oval", "draw_line"]
+            all_drawing_initiation_tools = area_definition_tools + shape_drawing_tools
 
-            # **** NEW: Finalize resizing operation ****
             if self.is_resizing_selection and self.selected_visual_info:
                 instance_id = self.selected_visual_info['id']
-                # Ensure the rect is normalized one last time before emitting
                 final_resized_view_qrect = self.selected_visual_info['rect'].normalized()
-                self.selected_visual_info['rect'] = final_resized_view_qrect # Update with normalized
-                print(f"Resize ended for ID: {instance_id}. New view QRect: {final_resized_view_qrect}")
+                self.selected_visual_info['rect'] = final_resized_view_qrect
                 self.areaResizedSignal.emit(instance_id, final_resized_view_qrect)
-                
                 self.is_resizing_selection = False
                 self.active_resize_handle = None
                 self.resize_start_mouse_pos = None
                 self.resize_start_rect = None
-                
-                # Reset cursor based on the active tool
-                if active_tool == "move_area":
-                    self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
-                elif active_tool == "select_area":
-                     self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.ArrowCursor)
-                # No specific update() needed here, as paintEvent will handle drawing final state
+                if active_tool == "move_area": self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
+                elif active_tool == "select_area": self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.ArrowCursor)
 
-            # Finalize moving a selection (as before)
             elif self.is_moving_selection and self.selected_visual_info:
                 instance_id = self.selected_visual_info['id']
                 new_view_qrect = self.selected_visual_info['rect']
@@ -823,46 +706,116 @@ class InteractivePdfLabel(QLabel):
                 self.is_moving_selection = False
                 self.drag_start_mouse_pos = None
                 self.drag_start_rect_pos = None
-                if active_tool == "move_area": # Reset to open hand after move
-                    self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
-                # No specific update() needed here either
-
-            # Finalize defining a new area (rubber band) (as before)
+                if active_tool == "move_area": self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
+            
+            # **** CORRECTED: Use all_drawing_initiation_tools for finalizing rubber band ****
             elif self.origin_point is not None and self.current_rubber_band_rect is not None and \
                  self.current_pixmap_page_num is not None and \
-                 active_tool in ["text_area", "signature_area", "initials_area"]:
+                 active_tool in all_drawing_initiation_tools:
                 final_rect_view = self.current_rubber_band_rect.normalized()
                 if final_rect_view.width() > 0 and final_rect_view.height() > 0:
                     self.rectDefinedSignal.emit(final_rect_view)
                 self.origin_point = None
                 self.current_rubber_band_rect = None
-                self.update() # Update to clear rubber band
+                self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event) 
+        painter = QPainter(self)
+
+        if self.current_pixmap_page_num is not None:
+            rect_infos_for_current_page = self.page_visual_rects.get(self.current_pixmap_page_num, [])
             
-            # If it was just a click for selection, mousePressEvent already handled it.
+            for info in rect_infos_for_current_page:
+                rect_to_draw = info['rect'] 
+                area_type = info.get('type', 'text_input')
+                is_selected = (self.selected_visual_info is not None and 
+                               self.selected_visual_info['id'] == info['id'])
+
+                pen_color_obj = QColor(Qt.GlobalColor.black)
+                pen_width = 1
+                current_brush = QBrush(Qt.BrushStyle.NoBrush)
+
+                if is_selected:
+                    pen_color_obj = QColor(Qt.GlobalColor.green)
+                    pen_width = 2
+                    current_brush = QBrush(Qt.BrushStyle.NoBrush) 
+                else: 
+                    oc_rgba = info.get('outline_color_rgba', (255, 0, 0, 255)) 
+                    fc_rgba = info.get('fill_color_rgba', (0, 0, 0, 0))       
+                    ow = info.get('outline_width', 1)                         
+
+                    pen_color_obj = QColor(oc_rgba[0], oc_rgba[1], oc_rgba[2], oc_rgba[3])
+                    pen_width = ow
+                    
+                    if fc_rgba[3] > 0: 
+                        current_brush = QBrush(QColor(fc_rgba[0], fc_rgba[1], fc_rgba[2], fc_rgba[3]), 
+                                               Qt.BrushStyle.SolidPattern)
+                    else:
+                        current_brush = QBrush(Qt.BrushStyle.NoBrush)
+
+                    if area_type == "signature_area":
+                        pen_color_obj = QColor(Qt.GlobalColor.blue) 
+                        pen_width = 1
+                        current_brush = QBrush(QColor(Qt.GlobalColor.darkGray), Qt.BrushStyle.FDiagPattern)
+                    elif area_type == "initials_area":
+                        pen_color_obj = QColor(Qt.GlobalColor.blue)
+                        pen_width = 1
+                        current_brush = QBrush(QColor(Qt.GlobalColor.darkGray), Qt.BrushStyle.BDiagPattern)
+                    elif area_type == "text_input":
+                        pen_color_obj = QColor(Qt.GlobalColor.blue)
+                        pen_width = 1
+                        current_brush = QBrush(Qt.BrushStyle.NoBrush)
+                
+                pen = QPen(pen_color_obj, pen_width, Qt.PenStyle.SolidLine)
+                painter.setPen(pen)
+                painter.setBrush(current_brush)
+                
+                if area_type in ["text_input", "signature_area", "initials_area", "drawing_rectangle"]:
+                    painter.drawRect(rect_to_draw)
+                elif area_type == "drawing_oval":
+                    painter.drawEllipse(rect_to_draw)
+                elif area_type == "drawing_line":
+                    painter.drawLine(rect_to_draw.topLeft(), rect_to_draw.bottomRight())
+            
+            if self.selected_visual_info and \
+               self.current_pixmap_page_num is not None and \
+               any(info['id'] == self.selected_visual_info['id'] for info in self.page_visual_rects.get(self.current_pixmap_page_num, [])):
+                selected_rect_for_handles = self.selected_visual_info['rect']
+                handle_rects = self._get_handle_rects(selected_rect_for_handles)
+                painter.setPen(QPen(QColor(Qt.GlobalColor.black), 1))
+                painter.setBrush(QBrush(QColor(Qt.GlobalColor.white)))
+                for handle_r in handle_rects.values():
+                    painter.drawRect(handle_r)
+            
+        if self.current_rubber_band_rect is not None and not self.current_rubber_band_rect.isNull():
+            pen_rubber_band = QPen(QColor(Qt.GlobalColor.red), 1, Qt.PenStyle.DashLine)
+            painter.setPen(pen_rubber_band)
+            painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            painter.drawRect(self.current_rubber_band_rect)
 
     def clearDefinedRects(self):
         self.page_visual_rects = {}
-        self.selected_visual_info = None # Clear selection too
+        old_selected_id = self.selected_visual_info['id'] if self.selected_visual_info else None
+        self.selected_visual_info = None
+        if old_selected_id:
+            self.areaSelectionChangedSignal.emit(None)
         self.update()
 
-    # **** NEW METHOD: To remove a specific visual rectangle by its ID ****
     def removeVisualRectById(self, page_num, instance_id):
+        removed = False
         if page_num in self.page_visual_rects:
+            initial_len = len(self.page_visual_rects[page_num])
             self.page_visual_rects[page_num] = [info for info in self.page_visual_rects[page_num] if info['id'] != instance_id]
-            if self.selected_visual_info and self.selected_visual_info['id'] == instance_id:
-                self.selected_visual_info = None
-                # No need to emit here, DesignerApp will call handleAreaSelectionChanged(None) after deletion
+            if len(self.page_visual_rects[page_num]) < initial_len:
+                removed = True
+        if self.selected_visual_info and self.selected_visual_info['id'] == instance_id:
+            self.selected_visual_info = None
+        if removed:
             self.update()
-            return True
-        return False
+        return removed
     
     def updateVisualRectPositionAndStyle(self, page_num, instance_id, new_rect=None, new_type=None):
-        """
-        Updates the properties (rect, type) of a specific visual rectangle
-        and triggers a repaint if it's on the current page.
-        If new_rect is None, only type might be updated (if new_type provided).
-        If new_type is None, only rect might be updated (if new_rect provided).
-        """
         if page_num in self.page_visual_rects:
             for i, info in enumerate(self.page_visual_rects[page_num]):
                 if info['id'] == instance_id:
@@ -873,18 +826,13 @@ class InteractivePdfLabel(QLabel):
                     if new_type is not None and info.get('type') != new_type:
                          self.page_visual_rects[page_num][i]['type'] = new_type
                          changed = True
-                    
                     if changed and page_num == self.current_pixmap_page_num:
-                        # If this was the selected item, update its rect in selected_visual_info too
                         if self.selected_visual_info and self.selected_visual_info['id'] == instance_id:
-                            if new_rect is not None:
-                                self.selected_visual_info['rect'] = new_rect
-                            if new_type is not None:
-                                self.selected_visual_info['type'] = new_type
+                            if new_rect is not None: self.selected_visual_info['rect'] = new_rect
+                            if new_type is not None: self.selected_visual_info['type'] = new_type
                         self.update()
-                    return True # Found and updated (or checked)
-        return False # Not found
-
+                    return True
+        return False
     
 class DesignerApp(QMainWindow):
     def __init__(self):
@@ -1251,11 +1199,8 @@ class DesignerApp(QMainWindow):
         return view_rect_infos
 
     def displayPdfPage(self, page_num): # Revised structure for clarity
-        # ... (initial checks and page loading to get qpixmap) ...
         if not self.pdf_document or page_num < 0 or page_num >= self.pdf_document.page_count:
-            # ... reset and return ... (as before)
             self._reset_pdf_display_label("Invalid page number or no PDF loaded.")
-            # self.currently_selected_area_instance_id = None # Already handled by _reset which calls handleAreaSelectionChanged
             self._updateNavigation()
             return
 
@@ -1264,14 +1209,12 @@ class DesignerApp(QMainWindow):
             self.handleAreaSelectionChanged(None)
 
         try:
-            # ... (load page, render pixmap, create qpixmap as before) ...
             page = self.pdf_document.load_page(page_num)
             mat = fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
             pix = page.get_pixmap(matrix=mat)
             img_format = QImage.Format.Format_RGB888 if pix.alpha == 0 else QImage.Format.Format_RGBA8888
             qimage = QImage(pix.samples, pix.width, pix.height, pix.stride, img_format)
             qpixmap = QPixmap.fromImage(qimage)
-
 
             self.pdf_display_label.setPixmap(qpixmap)
             self.pdf_display_label.setCurrentPixmapPage(page_num) # This tells label its page and calls update()
@@ -1280,15 +1223,14 @@ class DesignerApp(QMainWindow):
             self.pdf_display_label.clearDefinedRects() 
             view_rect_infos_for_this_page = self._get_view_rects_for_page(page_num)
             for info in view_rect_infos_for_this_page:
-                self.app.pdf_display_label.addVisualRect( # Changed from self.pdf_display_label
+                # **** CORRECTED LINE HERE ****
+                self.pdf_display_label.addVisualRect( 
                     page_num, info['rect'], info['id'], info['type'],
                     outline_color_rgba=info.get('outline_color_rgba'),
                     fill_color_rgba=info.get('fill_color_rgba'),
                     outline_width=info.get('outline_width')
                 )
-            # The label's own selected_visual_info will be None due to setCurrentPixmapPage or clearDefinedRects
-            # or if it's re-selected, mousePressEvent will handle it.
-
+            
             self.pdf_display_label.setMinimumSize(qpixmap.width(), qpixmap.height())
             self.pdf_display_label.adjustSize() 
 
@@ -1299,10 +1241,8 @@ class DesignerApp(QMainWindow):
                 self.scroll_area.verticalScrollBar().setValue(0)
                 self.scroll_area.horizontalScrollBar().setValue(0)
         except Exception as e:
-            # ... (error handling as before) ...
             QMessageBox.critical(self, "Error Displaying Page", f"Could not display page {page_num + 1}: {e}")
             self._reset_pdf_display_label(f"Error displaying page {page_num + 1}")
-            # self.currently_selected_area_instance_id = None # Already handled by _reset
             self._updateNavigation()
 
     def handleRectDefined(self, view_qrect): # view_qrect is the QRect from the signal
@@ -1315,7 +1255,7 @@ class DesignerApp(QMainWindow):
         if self.current_drawing_tool in ["text_area", "signature_area", "initials_area"]:
             tool_type_for_dialog = ""
             default_name_prefix = ""
-            area_data_type_string = ""
+            area_data_type_string = "" # This is the 'type' for storage
 
             if self.current_drawing_tool == "text_area":
                 tool_type_for_dialog = "Text Input"
@@ -1333,23 +1273,22 @@ class DesignerApp(QMainWindow):
             suggested_data_field_id = f"{default_name_prefix}_{len(self.defined_pdf_areas) + 1}"
             current_prompt_text = ""
 
-            while True: # Dialog loop
+            while True: 
                 dialog = AreaPropertiesDialog(
                     area_type=tool_type_for_dialog, 
                     default_data_field_id=suggested_data_field_id,
                     default_prompt=current_prompt_text,          
                     parent=self
                 )
-                if dialog.exec() == QDialog.DialogCode.Accepted:
+                if dialog.exec() == QDialog.DialogCode.Accepted: # Correct for PyQt6
                     properties = dialog.getProperties()
-                    suggested_data_field_id = properties["data_field_id"] # Keep for next suggestion
+                    suggested_data_field_id = properties["data_field_id"] 
                     current_prompt_text = properties["prompt"]
 
                     if properties and properties["data_field_id"]:
                         instance_id = f"inst_{uuid.uuid4().hex[:8]}"
                         inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
-                        view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
-                                                   view_qrect.right(), view_qrect.bottom())
+                        view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(), view_qrect.right(), view_qrect.bottom())
                         pdf_fitz_rect = view_fitz_rect * inverse_matrix
                         
                         area_info_to_add = {
@@ -1357,8 +1296,7 @@ class DesignerApp(QMainWindow):
                             'rect_pdf': tuple(pdf_fitz_rect.irect), 
                             'data_field_id': properties["data_field_id"], 'type': area_data_type_string, 
                             'prompt': properties["prompt"],
-                            'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), 
-                                                 view_qrect.width(), view_qrect.height())
+                            'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), view_qrect.width(), view_qrect.height())
                         }
                         command = AddAreaCommand(self, area_info_to_add)
                         self.executeCommand(command)
@@ -1369,10 +1307,28 @@ class DesignerApp(QMainWindow):
                     print(f"Area definition ({area_data_type_string}) cancelled by user.")
                     break 
         
-        # --- **** NEW: Logic for "draw_rectangle" tool (bypasses dialog for MVP) **** ---
-        elif self.current_drawing_tool == "draw_rectangle":
-            instance_id = f"draw_rect_{uuid.uuid4().hex[:8]}"
+        # --- Logic for Drawing Tools (Rectangle, Oval, Line - bypass dialog for MVP) ---
+        elif self.current_drawing_tool in ["draw_rectangle", "draw_oval", "draw_line"]:
+            instance_id_prefix = ""
+            area_data_type_string = "" # This is the 'type' for storage
+
+            if self.current_drawing_tool == "draw_rectangle":
+                instance_id_prefix = "draw_rect_"
+                area_data_type_string = "drawing_rectangle"
+            elif self.current_drawing_tool == "draw_oval":
+                instance_id_prefix = "draw_oval_"
+                area_data_type_string = "drawing_oval"
+            elif self.current_drawing_tool == "draw_line":
+                instance_id_prefix = "draw_line_"
+                area_data_type_string = "drawing_line"
+
+            instance_id = f"{instance_id_prefix}{uuid.uuid4().hex[:8]}"
             inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+            
+            # For lines, the view_qrect defines the start and end points.
+            # For PDF storage, we can still store this bounding box, or start/end points.
+            # Let's store the bounding box for consistency in rect_pdf for now.
+            # The paintEvent will interpret it as start/end for lines.
             view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
                                        view_qrect.right(), view_qrect.bottom())
             pdf_fitz_rect = view_fitz_rect * inverse_matrix
@@ -1380,23 +1336,25 @@ class DesignerApp(QMainWindow):
             area_info_to_add = {
                 'instance_id': instance_id,
                 'page_num': current_tool_page,
-                'rect_pdf': tuple(pdf_fitz_rect.irect),
-                'type': "drawing_rectangle", # Key for paintEvent
-                'data_field_id': instance_id, # Needs a data_field_id
-                'prompt': '', # No prompt
+                'rect_pdf': tuple(pdf_fitz_rect.irect), 
+                'type': area_data_type_string,
+                'data_field_id': instance_id, # Drawings use their instance_id as data_field_id
+                'prompt': "", # Drawings don't have prompts
                 'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), 
-                                     view_qrect.width(), view_qrect.height())
-                # No specific color/width properties stored in the data model for this MVP part A
+                                     view_qrect.width(), view_qrect.height()),
+                # Default visual properties for MVP drawings
+                'outline_color_rgba': (255, 0, 0, 255), # Red, fully opaque (R,G,B,A)
+                'fill_color_rgba': (0, 0, 0, 0),       # Transparent fill (especially for lines/rects)
+                'outline_width': 1
             }
             command = AddAreaCommand(self, area_info_to_add)
             self.executeCommand(command)
-            print(f"Drawing Rectangle Added (Instance ID: {instance_id})")
-            # No dialog for MVP drawing tool
-
-        # Add elif for "draw_oval" and "draw_line" here later
+            print(f"Drawing {area_data_type_string.replace('_', ' ').title()} Added (Instance ID: {instance_id})")
 
         else:
-            print(f"Rectangle defined with unhandled active drawing tool: {self.current_drawing_tool}")
+            # This case should ideally not be reached if mousePressEvent in InteractivePdfLabel
+            # only initiates drawing for known tools.
+            print(f"Rectangle defined with unhandled or no active drawing tool: {self.current_drawing_tool}")
             return
         
     def openPdfFile(self):
