@@ -177,6 +177,10 @@ class AddAreaCommand(Command):
         fill_rgba = self.area_info.get('fill_color_rgba')
         outline_w = self.area_info.get('outline_width')
         
+        # Get line-specific points if they exist in self.area_info
+        line_start_vt = self.area_info.get('line_start_view_tuple')
+        line_end_vt = self.area_info.get('line_end_view_tuple')
+
         self.app.pdf_display_label.addVisualRect(
             page_num, 
             view_qrect, 
@@ -184,7 +188,9 @@ class AddAreaCommand(Command):
             area_type, # Now defined
             outline_color_rgba=outline_rgba,
             fill_color_rgba=fill_rgba,
-            outline_width=outline_w
+            outline_width=outline_w,
+            line_start_view_tuple=line_start_vt,
+            line_end_view_tuple=line_end_vt
         )
         print(f"Command: Visual for area {instance_id} on page {page_num + 1} added.")
         self.app.statusBar().showMessage(f"Area '{self.area_info.get('data_field_id', instance_id)}' added.", 3000)
@@ -447,6 +453,10 @@ class InteractivePdfLabel(QLabel):
         self.resize_start_mouse_pos = None 
         self.resize_start_rect = None      
 
+        self.current_line_preview_end_point = None 
+        self.last_drag_actual_start_point = None
+        self.last_drag_actual_end_point = None
+
     def _get_handle_rects(self, base_rect):
         if not base_rect or base_rect.isNull():
             return {}
@@ -486,17 +496,32 @@ class InteractivePdfLabel(QLabel):
                 self.areaSelectionChangedSignal.emit(None) # Emit only if selection actually changes to None
         self.update()
 
-    def addVisualRect(self, page_num, view_qrect, instance_id, area_type, 
-                      outline_color_rgba=None, fill_color_rgba=None, outline_width=None):
+    def addVisualRect(self, page_num, view_qrect_bounding_box, instance_id, area_type, 
+                      outline_color_rgba=None, fill_color_rgba=None, outline_width=None,
+                      line_start_view_tuple=None, line_end_view_tuple=None): # Added line points
         if page_num not in self.page_visual_rects:
             self.page_visual_rects[page_num] = []
+        
         item_info = {
-            'rect': view_qrect, 'id': instance_id, 'type': area_type,
+            'rect': view_qrect_bounding_box, # This is the bounding box
+            'id': instance_id, 
+            'type': area_type,
             'outline_color_rgba': outline_color_rgba if outline_color_rgba else (255,0,0,255),
             'fill_color_rgba': fill_color_rgba if fill_color_rgba else (0,0,0,0),
             'outline_width': outline_width if outline_width is not None else 1
         }
+        # **** STORE LINE-SPECIFIC POINTS ****
+        if area_type == "drawing_line":
+            if line_start_view_tuple and line_end_view_tuple:
+                item_info['line_start_view_point'] = QPoint(line_start_view_tuple[0], line_start_view_tuple[1])
+                item_info['line_end_view_point'] = QPoint(line_end_view_tuple[0], line_end_view_tuple[1])
+            else: # Fallback or error if points not provided
+                print(f"Warning: Line endpoints not provided for {instance_id}, will use bounding box diagonal.")
+                item_info['line_start_view_point'] = view_qrect_bounding_box.topLeft()
+                item_info['line_end_view_point'] = view_qrect_bounding_box.bottomRight()
+
         self.page_visual_rects[page_num].append(item_info)
+        
         if page_num == self.current_pixmap_page_num:
             self.update()
 
@@ -518,7 +543,13 @@ class InteractivePdfLabel(QLabel):
 
             if active_tool in all_drawing_initiation_tools:
                 self.origin_point = click_pos
-                self.current_rubber_band_rect = QRect(self.origin_point, self.origin_point)
+                self.current_rubber_band_rect = QRect(self.origin_point, self.origin_point) # Still needed for signal
+                
+                if active_tool == "draw_line":
+                    self.current_line_preview_end_point = click_pos # Init line preview end
+                else:
+                    self.current_line_preview_end_point = None # Clear for other tools
+                
                 if self.selected_visual_info is not None:
                     self.selected_visual_info = None
                     self.areaSelectionChangedSignal.emit(None)
@@ -654,6 +685,8 @@ class InteractivePdfLabel(QLabel):
         elif self.origin_point is not None and self.current_rubber_band_rect is not None and \
              active_tool in all_drawing_initiation_tools:
             self.current_rubber_band_rect = QRect(self.origin_point, current_pos).normalized()
+            if active_tool == "draw_line":
+                self.current_line_preview_end_point = current_pos
             self.update()
             return
 
@@ -687,7 +720,9 @@ class InteractivePdfLabel(QLabel):
             shape_drawing_tools = ["draw_rectangle", "draw_oval", "draw_line"]
             all_drawing_initiation_tools = area_definition_tools + shape_drawing_tools
 
+            # Finalize resizing operation (as before)
             if self.is_resizing_selection and self.selected_visual_info:
+                # ... (existing resize finalization logic, emit areaResizedSignal) ...
                 instance_id = self.selected_visual_info['id']
                 final_resized_view_qrect = self.selected_visual_info['rect'].normalized()
                 self.selected_visual_info['rect'] = final_resized_view_qrect
@@ -698,8 +733,11 @@ class InteractivePdfLabel(QLabel):
                 self.resize_start_rect = None
                 if active_tool == "move_area": self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
                 elif active_tool == "select_area": self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.ArrowCursor)
+                return # Important to return after handling resize
 
+            # Finalize moving a selection (as before)
             elif self.is_moving_selection and self.selected_visual_info:
+                # ... (existing move finalization logic, emit areaMovedSignal) ...
                 instance_id = self.selected_visual_info['id']
                 new_view_qrect = self.selected_visual_info['rect']
                 self.areaMovedSignal.emit(instance_id, new_view_qrect)
@@ -707,16 +745,36 @@ class InteractivePdfLabel(QLabel):
                 self.drag_start_mouse_pos = None
                 self.drag_start_rect_pos = None
                 if active_tool == "move_area": self.parent_widget.pdf_display_label.setCursor(Qt.CursorShape.OpenHandCursor)
+                return # Important to return after handling move
             
-            # **** CORRECTED: Use all_drawing_initiation_tools for finalizing rubber band ****
+            # Finalize defining a new area/shape (rubber band)
             elif self.origin_point is not None and self.current_rubber_band_rect is not None and \
                  self.current_pixmap_page_num is not None and \
                  active_tool in all_drawing_initiation_tools:
-                final_rect_view = self.current_rubber_band_rect.normalized()
-                if final_rect_view.width() > 0 and final_rect_view.height() > 0:
+                
+                final_rect_view = self.current_rubber_band_rect.normalized() # Bounding box
+
+                # **** STORE ACTUAL START/END POINTS FOR LINES ****
+                if active_tool == "draw_line":
+                    self.last_drag_actual_start_point = QPoint(self.origin_point) # Store a copy
+                    self.last_drag_actual_end_point = QPoint(self.current_line_preview_end_point)
+                else:
+                    self.last_drag_actual_start_point = None
+                    self.last_drag_actual_end_point = None
+
+                # Emit signal (still with bounding box for consistency for now)
+                # DesignerApp will fetch specific points if it was a line.
+                if active_tool == "draw_line":
+                    if self.origin_point != self.current_line_preview_end_point : 
+                         self.rectDefinedSignal.emit(final_rect_view)
+                    else:
+                        print("Line has zero length, not defined.")
+                elif final_rect_view.width() > 0 and final_rect_view.height() > 0 : 
                     self.rectDefinedSignal.emit(final_rect_view)
+                
                 self.origin_point = None
                 self.current_rubber_band_rect = None
+                self.current_line_preview_end_point = None 
                 self.update()
 
     def paintEvent(self, event):
@@ -776,7 +834,10 @@ class InteractivePdfLabel(QLabel):
                 elif area_type == "drawing_oval":
                     painter.drawEllipse(rect_to_draw)
                 elif area_type == "drawing_line":
-                    painter.drawLine(rect_to_draw.topLeft(), rect_to_draw.bottomRight())
+                    # **** USE STORED START/END POINTS ****
+                    start_point = info.get('line_start_view_point', rect_to_draw.topLeft()) # Fallback
+                    end_point = info.get('line_end_view_point', rect_to_draw.bottomRight())   # Fallback
+                    painter.drawLine(start_point, end_point)
             
             if self.selected_visual_info and \
                self.current_pixmap_page_num is not None and \
@@ -793,6 +854,27 @@ class InteractivePdfLabel(QLabel):
             painter.setPen(pen_rubber_band)
             painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
             painter.drawRect(self.current_rubber_band_rect)
+
+        if self.origin_point is not None and \
+           self.parent_widget and hasattr(self.parent_widget, 'current_drawing_tool'):
+            
+            active_tool = self.parent_widget.current_drawing_tool
+            pen_preview = QPen(QColor(Qt.GlobalColor.red), 1, Qt.PenStyle.DashLine)
+            painter.setPen(pen_preview)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+            # Define all tools that use rubber-band for defining new shapes/areas
+            area_definition_tools = ["text_area", "signature_area", "initials_area"]
+            shape_drawing_tools = ["draw_rectangle", "draw_oval"] # Line is handled separately now
+            rubber_band_rect_tools = area_definition_tools + shape_drawing_tools
+
+            if active_tool == "draw_line" and self.current_line_preview_end_point is not None:
+                # Draw the line preview from origin_point to current_line_preview_end_point
+                painter.drawLine(self.origin_point, self.current_line_preview_end_point)
+            elif active_tool in rubber_band_rect_tools and self.current_rubber_band_rect is not None and \
+                 not self.current_rubber_band_rect.isNull():
+                # For other drawing tools, draw the dashed rectangle
+                painter.drawRect(self.current_rubber_band_rect)
 
     def clearDefinedRects(self):
         self.page_visual_rects = {}
@@ -1187,15 +1269,35 @@ class DesignerApp(QMainWindow):
                 view_fitz_rect = pdf_fitz_rect * matrix
                 view_qrect = QRect(round(view_fitz_rect.x0), round(view_fitz_rect.y0),
                                 round(view_fitz_rect.width), round(view_fitz_rect.height))
-                # **** CHANGE: Include type ****
-                view_rect_infos.append({
-                    'rect': view_qrect, 
+
+                item_to_add_to_label = {
+                    'rect': view_qrect, # Bounding box for selection/handles
                     'id': area_info['instance_id'],
                     'type': area_info['type'],
-                    'outline_color_rgba': area_info.get('outline_color_rgba'), # Pass along
-                    'fill_color_rgba': area_info.get('fill_color_rgba'),       # Pass along
-                    'outline_width': area_info.get('outline_width')            # Pass along
-                })
+                    'outline_color_rgba': area_info.get('outline_color_rgba'),
+                    'fill_color_rgba': area_info.get('fill_color_rgba'),
+                    'outline_width': area_info.get('outline_width')
+                }
+                
+                # If it's a line, add its specific view endpoints
+                if area_info['type'] == "drawing_line":
+                    # Transform stored PDF line endpoints back to view for display
+                    matrix = fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
+                    
+                    start_pdf_tuple = area_info.get('line_start_pdf_tuple')
+                    end_pdf_tuple = area_info.get('line_end_pdf_tuple')
+
+                    if start_pdf_tuple and end_pdf_tuple:
+                        start_view_fitz = fitz.Point(start_pdf_tuple[0], start_pdf_tuple[1]) * matrix
+                        end_view_fitz = fitz.Point(end_pdf_tuple[0], end_pdf_tuple[1]) * matrix
+                        
+                        item_to_add_to_label['line_start_view_point'] = QPoint(round(start_view_fitz.x), round(start_view_fitz.y))
+                        item_to_add_to_label['line_end_view_point'] = QPoint(round(end_view_fitz.x), round(end_view_fitz.y))
+                    else: # Fallback if PDF line points are missing (should not happen if saved correctly)
+                        item_to_add_to_label['line_start_view_point'] = view_qrect.topLeft()
+                        item_to_add_to_label['line_end_view_point'] = view_qrect.bottomRight()
+                
+                view_rect_infos.append(item_to_add_to_label) # This is now a list of dicts
         return view_rect_infos
 
     def displayPdfPage(self, page_num): # Revised structure for clarity
@@ -1222,13 +1324,19 @@ class DesignerApp(QMainWindow):
             # Clear old visual rects from label (for ALL pages) and then add for current page
             self.pdf_display_label.clearDefinedRects() 
             view_rect_infos_for_this_page = self._get_view_rects_for_page(page_num)
-            for info in view_rect_infos_for_this_page:
-                # **** CORRECTED LINE HERE ****
-                self.pdf_display_label.addVisualRect( 
-                    page_num, info['rect'], info['id'], info['type'],
-                    outline_color_rgba=info.get('outline_color_rgba'),
-                    fill_color_rgba=info.get('fill_color_rgba'),
-                    outline_width=info.get('outline_width')
+            for info_dict in view_rect_infos_for_this_page: # Iterate through the dicts
+                self.pdf_display_label.addVisualRect(
+                    page_num, 
+                    info_dict['rect'], # Bounding box
+                    info_dict['id'], 
+                    info_dict['type'],
+                    outline_color_rgba=info_dict.get('outline_color_rgba'),
+                    fill_color_rgba=info_dict.get('fill_color_rgba'),
+                    outline_width=info_dict.get('outline_width'),
+                    line_start_view_tuple=(info_dict['line_start_view_point'].x(), info_dict['line_start_view_point'].y()) 
+                                           if 'line_start_view_point' in info_dict else None,
+                    line_end_view_tuple=(info_dict['line_end_view_point'].x(), info_dict['line_end_view_point'].y())
+                                           if 'line_end_view_point' in info_dict else None
                 )
             
             self.pdf_display_label.setMinimumSize(qpixmap.width(), qpixmap.height())
@@ -1310,7 +1418,7 @@ class DesignerApp(QMainWindow):
         # --- Logic for Drawing Tools (Rectangle, Oval, Line - bypass dialog for MVP) ---
         elif self.current_drawing_tool in ["draw_rectangle", "draw_oval", "draw_line"]:
             instance_id_prefix = ""
-            area_data_type_string = "" # This is the 'type' for storage
+            area_data_type_string = ""
 
             if self.current_drawing_tool == "draw_rectangle":
                 instance_id_prefix = "draw_rect_"
@@ -1325,37 +1433,63 @@ class DesignerApp(QMainWindow):
             instance_id = f"{instance_id_prefix}{uuid.uuid4().hex[:8]}"
             inverse_matrix = ~fitz.Matrix(self.current_zoom_factor, self.current_zoom_factor)
             
-            # For lines, the view_qrect defines the start and end points.
-            # For PDF storage, we can still store this bounding box, or start/end points.
-            # Let's store the bounding box for consistency in rect_pdf for now.
-            # The paintEvent will interpret it as start/end for lines.
-            view_fitz_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
-                                       view_qrect.right(), view_qrect.bottom())
-            pdf_fitz_rect = view_fitz_rect * inverse_matrix
+            view_fitz_bounding_rect = fitz.Rect(view_qrect.x(), view_qrect.y(),
+                                                view_qrect.right(), view_qrect.bottom())
+            pdf_fitz_bounding_rect = view_fitz_bounding_rect * inverse_matrix
 
             area_info_to_add = {
                 'instance_id': instance_id,
                 'page_num': current_tool_page,
-                'rect_pdf': tuple(pdf_fitz_rect.irect), 
+                'rect_pdf': tuple(pdf_fitz_bounding_rect.irect), 
                 'type': area_data_type_string,
-                'data_field_id': instance_id, # Drawings use their instance_id as data_field_id
-                'prompt': "", # Drawings don't have prompts
-                'view_qrect_tuple': (view_qrect.x(), view_qrect.y(), 
+                'data_field_id': instance_id, 
+                'prompt': "", 
+                'view_qrect_tuple': (view_qrect.x(), view_qrect.y(),
                                      view_qrect.width(), view_qrect.height()),
-                # Default visual properties for MVP drawings
-                'outline_color_rgba': (255, 0, 0, 255), # Red, fully opaque (R,G,B,A)
-                'fill_color_rgba': (0, 0, 0, 0),       # Transparent fill (especially for lines/rects)
+                'outline_color_rgba': (255, 0, 0, 255), 
+                'fill_color_rgba': (0, 0, 0, 0),      
                 'outline_width': 1
             }
+
+
+            if area_data_type_string == "drawing_line":
+                start_point_view_qpoint = self.pdf_display_label.last_drag_actual_start_point # This is a QPoint
+                end_point_view_qpoint = self.pdf_display_label.last_drag_actual_end_point     # This is a QPoint
+
+                if start_point_view_qpoint and end_point_view_qpoint:
+                    area_info_to_add['line_start_view_tuple'] = (start_point_view_qpoint.x(), start_point_view_qpoint.y())
+                    area_info_to_add['line_end_view_tuple'] = (end_point_view_qpoint.x(), end_point_view_qpoint.y())
+
+                    # **** CONVERT QPoint to fitz.Point BEFORE multiplication ****
+                    fitz_start_point_view = fitz.Point(start_point_view_qpoint.x(), start_point_view_qpoint.y())
+                    fitz_end_point_view = fitz.Point(end_point_view_qpoint.x(), end_point_view_qpoint.y())
+
+                    pdf_start_point = fitz_start_point_view * inverse_matrix # Now multiplying fitz.Point by fitz.Matrix
+                    pdf_end_point = fitz_end_point_view * inverse_matrix     # Same here
+
+                    area_info_to_add['line_start_pdf_tuple'] = (round(pdf_start_point.x), round(pdf_start_point.y))
+                    area_info_to_add['line_end_pdf_tuple'] = (round(pdf_end_point.x), round(pdf_end_point.y))
+                else:
+                    print("Warning: Could not retrieve actual line endpoints for drawing_line when defining.")
+                    # Fallback to ensure keys exist, using bounding box corners
+                    area_info_to_add['line_start_view_tuple'] = (view_qrect.x(), view_qrect.y())
+                    area_info_to_add['line_end_view_tuple'] = (view_qrect.right(), view_qrect.bottom())
+                    
+                    # Calculate PDF fallbacks for line points too
+                    fitz_start_fallback_view = fitz.Point(view_qrect.x(), view_qrect.y())
+                    fitz_end_fallback_view = fitz.Point(view_qrect.right(), view_qrect.bottom())
+                    pdf_start_fallback = fitz_start_fallback_view * inverse_matrix
+                    pdf_end_fallback = fitz_end_fallback_view * inverse_matrix
+                    area_info_to_add['line_start_pdf_tuple'] = (round(pdf_start_fallback.x), round(pdf_start_fallback.y))
+                    area_info_to_add['line_end_pdf_tuple'] = (round(pdf_end_fallback.x), round(pdf_end_fallback.y))
+
+
             command = AddAreaCommand(self, area_info_to_add)
             self.executeCommand(command)
             print(f"Drawing {area_data_type_string.replace('_', ' ').title()} Added (Instance ID: {instance_id})")
 
         else:
-            # This case should ideally not be reached if mousePressEvent in InteractivePdfLabel
-            # only initiates drawing for known tools.
-            print(f"Rectangle defined with unhandled or no active drawing tool: {self.current_drawing_tool}")
-            return
+            print(f"Rectangle defined with unhandled active drawing tool: {self.current_drawing_tool}")
         
     def openPdfFile(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open PDF File", "", 
